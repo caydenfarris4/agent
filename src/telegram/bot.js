@@ -1,9 +1,18 @@
 import { Bot } from "grammy";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { config } from "../config.js";
 import { db, settings, isPaused, setPaused, logEvent } from "../db.js";
 
 export function createBot() {
-  const bot = new Bot(config.telegramToken);
+  // Honor HTTPS_PROXY when present (e.g. sandboxed/corporate environments).
+  // grammY's node-fetch ignores proxy env vars, so pass an agent explicitly.
+  // On a normal VPS this is a no-op.
+  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
+  const bot = new Bot(config.telegramToken, {
+    client: proxy
+      ? { baseFetchConfig: { agent: new HttpsProxyAgent(proxy), compress: true } }
+      : undefined,
+  });
 
   // --- Owner lock -----------------------------------------------------------
   // Only Cayden talks to this bot. Owner is TELEGRAM_OWNER_ID if set;
