@@ -1,0 +1,21 @@
+{
+  "name": "under-construction-launch-system",
+  "version": "0.1.0",
+  "description": "Multi-agent book launch system for Under Construction. Telegram command center, Claude API agents, SQLite state, Postiz publishing.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^16.4.5",
+    "grammy": "^1.44.0",
+    "node-cron": "^4.6.0"
+  }
+}
