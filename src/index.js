@@ -19,6 +19,12 @@ console.log(
   `Loaded system prompts for ${AGENT_KEYS.length} agents from prompts/ (constitution re-read on every call).`,
 );
 
+if (!config.anthropicApiKey) {
+  console.warn(
+    "ANTHROPIC_API_KEY is not set: /status, /pause, /resume work, but /draft and Chief of Staff chat are offline.",
+  );
+}
+
 const bot = createBot();
 
 async function main() {

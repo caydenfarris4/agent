@@ -97,6 +97,49 @@ export function setPaused(paused) {
   settings.set("paused", paused ? "1" : "0");
 }
 
+const insertDraft = db.prepare(`
+  INSERT INTO drafts (agent, vertical, platform, content, status)
+  VALUES (@agent, @vertical, @platform, @content, @status)
+`);
+const getDraft = db.prepare("SELECT * FROM drafts WHERE id = ?");
+const listDraftsByStatus = db.prepare(
+  "SELECT * FROM drafts WHERE status = ? ORDER BY created_at",
+);
+
+const DRAFT_COLUMNS = new Set([
+  "content",
+  "rationale",
+  "status",
+  "critique_verdict",
+  "critique_notes",
+  "quality_flag",
+  "rejection_reason",
+  "media_file_id",
+  "scheduled_for",
+  "published_at",
+]);
+
+export const drafts = {
+  insert({ agent, vertical, platform, content, status = "drafting" }) {
+    const info = insertDraft.run({ agent, vertical, platform, content, status });
+    return Number(info.lastInsertRowid);
+  },
+  get(id) {
+    return getDraft.get(id);
+  },
+  listByStatus(status) {
+    return listDraftsByStatus.all(status);
+  },
+  update(id, fields) {
+    const keys = Object.keys(fields).filter((k) => DRAFT_COLUMNS.has(k));
+    if (keys.length === 0) return;
+    const sets = keys.map((k) => `${k} = @${k}`).join(", ");
+    db.prepare(
+      `UPDATE drafts SET ${sets}, updated_at = datetime('now') WHERE id = @id`,
+    ).run({ ...fields, id });
+  },
+};
+
 const insertEvent = db.prepare(
   "INSERT INTO events (type, payload) VALUES (?, ?)",
 );

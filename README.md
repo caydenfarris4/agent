@@ -32,7 +32,7 @@ The three governing documents live in this repo and are loaded at runtime:
 ## Build milestones
 
 - [x] **M1** — Telegram bot skeleton: `/status`, `/pause`, `/resume`, owner lock, SQLite, prompt loading
-- [ ] **M2** — Full pipeline pass: Content draft → Critique audit → approval buttons → dry-run publish
+- [x] **M2** — Full pipeline pass: `/draft` → Content draft → Chief of Staff review → Critique audit → approval buttons → dry-run publish, plus `/queue` and Chief of Staff chat
 - [ ] **M3** — Remaining specialists and commands
 - [ ] **M4** — Schedulers: daily Chief of Staff run, weekly plan + analytics report
 - [ ] **M5** — Postiz integration (still dry run)
