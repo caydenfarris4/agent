@@ -6,9 +6,7 @@ import { callAgent } from "../agents/client.js";
 import { runContentPipeline } from "../agents/pipeline.js";
 import { publishDraft, flushApproved } from "../publish.js";
 import { sendApprovalCard } from "./approvals.js";
-
-const PLATFORMS = new Set(["linkedin", "instagram", "x", "email"]);
-const VERTICALS = new Set(["book", "app"]);
+import { registerM3, parseTargeting } from "./m3.js";
 
 export function createBot() {
   // Honor HTTPS_PROXY when present (e.g. sandboxed/corporate environments).
@@ -65,8 +63,8 @@ export function createBot() {
   bot.command("start", async (ctx) => {
     await ctx.reply(
       "Under Construction launch system online.\n\n" +
-        "Commands: /status /draft /queue /plan /report /book /app /idea /outreach /kdp /pause /resume /amend\n\n" +
-        "Or just talk to the Chief of Staff.",
+        "Commands: /status /draft /queue /reply /plan /report /book /app /idea /outreach /kdp /pause /resume /amend\n\n" +
+        "Send a photo or video with a caption as an asset drop, or just talk to the Chief of Staff.",
     );
   });
 
@@ -124,17 +122,7 @@ export function createBot() {
       );
     }
 
-    const words = args.split(/\s+/);
-    let platform = "linkedin";
-    let vertical = "book";
-    while (words.length > 1) {
-      const w = words[0].toLowerCase();
-      if (PLATFORMS.has(w)) platform = w;
-      else if (VERTICALS.has(w)) vertical = w;
-      else break;
-      words.shift();
-    }
-    const brief = words.join(" ");
+    const { platform, vertical, rest: brief } = parseTargeting(args);
 
     const chatId = ctx.chat.id;
     await ctx.reply(
@@ -230,16 +218,13 @@ export function createBot() {
     await ctx.reply(line);
   });
 
+  // --- M3: specialists, commands, asset drops --------------------------------
+  registerM3(bot, { requireApiKey });
+
   // --- Commands arriving in later milestones ---------------------------------
   const pending = {
     plan: "M4",
     report: "M4",
-    book: "M3",
-    app: "M3",
-    idea: "M3",
-    outreach: "M3",
-    kdp: "M3",
-    amend: "M3",
   };
   for (const [cmd, milestone] of Object.entries(pending)) {
     bot.command(cmd, async (ctx) => {
@@ -294,7 +279,7 @@ export function createBot() {
 
   bot.on("message", async (ctx) => {
     await ctx.reply(
-      "Media asset drops arrive in M3. For now send text, or use /draft to run the content pipeline.",
+      "Send photos or videos with a caption as asset drops. Other media types aren't supported yet.",
     );
   });
 
@@ -310,6 +295,7 @@ export async function registerCommandMenu(bot) {
     { command: "status", description: "Queue depth, today's posts, what's waiting on you" },
     { command: "draft", description: "Run the content pipeline on a brief" },
     { command: "queue", description: "Resend anything awaiting approval" },
+    { command: "reply", description: "Draft a reply to a comment you paste" },
     { command: "plan", description: "Trigger or review the weekly plan" },
     { command: "report", description: "Two-vertical weekly analytics report" },
     { command: "book", description: "Book vertical metrics snapshot" },

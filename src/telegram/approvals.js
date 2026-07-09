@@ -14,6 +14,7 @@ export function draftCard(draft) {
   const lines = [
     `Draft #${draft.id} · ${draft.vertical} · ${draft.platform}`,
   ];
+  if (draft.media_file_id) lines.push("Built around your uploaded asset.");
   if (draft.critique_verdict === "ESCALATE") {
     lines.push("⚠️ ESCALATION, the Chief of Staff and Critique Agent disagree:");
     if (draft.critique_notes) lines.push(draft.critique_notes);

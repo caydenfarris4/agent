@@ -140,6 +140,71 @@ export const drafts = {
   },
 };
 
+const insertOutreach = db.prepare(`
+  INSERT INTO outreach (target, brief, pitch, status, last_action_at)
+  VALUES (@target, @brief, @pitch, @status, datetime('now'))
+`);
+const OUTREACH_COLUMNS = new Set(["target", "brief", "pitch", "status", "last_action_at"]);
+
+export const outreach = {
+  insert({ target, brief = null, pitch = null, status = "researched" }) {
+    const info = insertOutreach.run({ target, brief, pitch, status });
+    return Number(info.lastInsertRowid);
+  },
+  get(id) {
+    return db.prepare("SELECT * FROM outreach WHERE id = ?").get(id);
+  },
+  listByStatus(status) {
+    return db
+      .prepare("SELECT * FROM outreach WHERE status = ? ORDER BY created_at")
+      .all(status);
+  },
+  counts() {
+    return db
+      .prepare("SELECT status, COUNT(*) AS n FROM outreach GROUP BY status")
+      .all();
+  },
+  update(id, fields) {
+    const keys = Object.keys(fields).filter((k) => OUTREACH_COLUMNS.has(k));
+    if (keys.length === 0) return;
+    const sets = keys.map((k) => `${k} = @${k}`).join(", ");
+    db.prepare(
+      `UPDATE outreach SET ${sets}, last_action_at = datetime('now') WHERE id = @id`,
+    ).run({ ...fields, id });
+  },
+};
+
+const insertMetric = db.prepare(
+  "INSERT INTO metrics_log (vertical, metric, value, note) VALUES (?, ?, ?, ?)",
+);
+
+export const metrics = {
+  insert({ vertical, metric, value, note = null }) {
+    insertMetric.run(vertical, metric, String(value), note);
+  },
+  recent(vertical, limit = 10) {
+    return db
+      .prepare(
+        "SELECT * FROM metrics_log WHERE vertical = ? ORDER BY recorded_at DESC LIMIT ?",
+      )
+      .all(vertical, limit);
+  },
+};
+
+export const kdp = {
+  insert(rawText) {
+    const info = db
+      .prepare("INSERT INTO kdp_entries (raw_text) VALUES (?)")
+      .run(rawText);
+    return Number(info.lastInsertRowid);
+  },
+  latest() {
+    return db
+      .prepare("SELECT * FROM kdp_entries ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get();
+  },
+};
+
 const insertEvent = db.prepare(
   "INSERT INTO events (type, payload) VALUES (?, ?)",
 );

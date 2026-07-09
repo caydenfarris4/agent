@@ -1,10 +1,18 @@
 import { callAgent } from "./client.js";
 import { drafts, logEvent } from "../db.js";
 
-// One extra Content pass after a FIX verdict; a second FIX escalates to
+// One extra specialist pass after a FIX verdict; a second FIX escalates to
 // Cayden instead of looping (build guide: FIX loops back once with the
 // violation attached, disagreements end up in front of Cayden).
 const MAX_FIX_ROUNDS = 1;
+
+const SPECIALIST_NAMES = {
+  content: "Content Agent",
+  engagement: "Engagement Agent",
+  outreach: "Outreach Agent",
+  book_growth: "Book Growth Agent",
+  app_growth: "App Growth Agent",
+};
 
 /**
  * Parse "FIELD: value" blocks out of an agent reply. A field's value runs
@@ -28,7 +36,7 @@ export function parseFields(text) {
   return out;
 }
 
-function briefMessage({ brief, vertical, platform }) {
+export function contentBrief({ brief, vertical, platform }) {
   return [
     "Brief from the Chief of Staff.",
     `Vertical: ${vertical}`,
@@ -39,46 +47,72 @@ function briefMessage({ brief, vertical, platform }) {
   ].join("\n");
 }
 
-async function contentDraft(call, job) {
-  const text = await call("content", [
-    { role: "user", content: briefMessage(job) },
+/** Wrap message text with the job's image (asset drops) when present. */
+function withImage(job, text) {
+  if (!job.imageBase64) return text;
+  return [
+    { type: "text", text },
+    {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: job.imageMediaType || "image/jpeg",
+        data: job.imageBase64,
+      },
+    },
+  ];
+}
+
+async function specialistDraft(call, job) {
+  const text = await call(job.specialist, [
+    { role: "user", content: withImage(job, job.assignment) },
   ]);
   return text.trim();
 }
 
-async function contentRedraft(call, job, draftText, violation) {
+async function specialistRedraft(call, job, draftText, violation) {
   const message = [
-    briefMessage(job),
+    job.assignment,
     "",
-    "Your previous draft was returned by the Critique Agent with this violation:",
+    "Your previous draft was returned with this violation:",
     violation,
     "",
     "Previous draft:",
     draftText,
     "",
-    "Rewrite the post to fix the violation while keeping what worked. Return only the revised post copy.",
+    "Rewrite it to fix the violation while keeping what worked. Return only the revised copy.",
   ].join("\n");
-  const text = await call("content", [{ role: "user", content: message }]);
+  const text = await call(job.specialist, [
+    { role: "user", content: withImage(job, message) },
+  ]);
   return text.trim();
 }
 
 async function chiefReview(call, job, draftText) {
+  const name = SPECIALIST_NAMES[job.specialist] || job.specialist;
   const message = [
-    "The Content Agent submitted this draft for your review before it goes to the Critique Agent.",
+    `The ${name} submitted this draft for your review before it goes to the Critique Agent.`,
     `Vertical: ${job.vertical}`,
     `Platform: ${job.platform}`,
-    `Brief: ${job.brief}`,
+    job.mediaFileId
+      ? "The draft is built around an asset Cayden uploaded; you are seeing the copy only."
+      : null,
+    "",
+    "Assignment given to the specialist:",
+    job.assignment,
     "",
     "DRAFT:",
     draftText,
     "",
     "Review it for strategy, voice, and fit. Light edits are yours to make. Respond in exactly this format, nothing before or after:",
     "DECISION: SEND or RETURN",
-    "RATIONALE: one line for Cayden's approval card, naming the specific reason this post earns a slot",
+    "RATIONALE: one line for Cayden's approval card, naming the specific reason this earns a slot",
     "NOTES: only if RETURN, what the specialist must fix",
     "DRAFT:",
     "the final draft text (your edited version if you made edits, otherwise the draft unchanged)",
-  ].join("\n");
+  ]
+    .filter((l) => l !== null)
+    .join("\n");
   const text = await call("chief_of_staff", [{ role: "user", content: message }]);
   const fields = parseFields(text);
   const decision = /return/i.test(fields.decision || "") ? "RETURN" : "SEND";
@@ -137,33 +171,42 @@ async function chiefEscalationPosition(call, job, draftText, critiquePosition) {
 }
 
 /**
- * Run one full M2 pipeline pass:
- * Content draft -> Chief of Staff review -> Critique audit -> approval queue.
+ * Run one full pipeline pass for any specialist:
+ * specialist draft -> Chief of Staff review -> Critique audit -> approval queue.
  *
- * Returns the queued draft row. FIX loops back to the Content Agent once
- * with the violation attached; a second FIX, or an ESCALATE verdict, queues
- * the draft as an escalation carrying both positions so Cayden decides.
+ * Returns the queued draft row. FIX loops back to the specialist once with
+ * the violation attached; a second FIX, or an ESCALATE verdict, queues the
+ * draft as an escalation carrying both positions so Cayden decides.
  *
- * @param {{brief: string, vertical: string, platform: string}} job
+ * @param {{specialist: string, assignment: string, vertical: string, platform: string,
+ *          mediaFileId?: string, imageBase64?: string, imageMediaType?: string}} job
  * @param {{call?: Function, onProgress?: (line: string) => Promise<void>}} deps
  */
-export async function runContentPipeline(job, { call = callAgent, onProgress = async () => {} } = {}) {
-  await onProgress("Content Agent is drafting...");
-  let draftText = await contentDraft(call, job);
+export async function runSpecialistPipeline(job, { call = callAgent, onProgress = async () => {} } = {}) {
+  const name = SPECIALIST_NAMES[job.specialist] || job.specialist;
+  await onProgress(`${name} is drafting...`);
+  let draftText = await specialistDraft(call, job);
   const id = drafts.insert({
-    agent: "content",
+    agent: job.specialist,
     vertical: job.vertical,
     platform: job.platform,
     content: draftText,
     status: "cos_review",
   });
-  logEvent("pipeline_started", { draft_id: id, ...job });
+  if (job.mediaFileId) drafts.update(id, { media_file_id: job.mediaFileId });
+  logEvent("pipeline_started", {
+    draft_id: id,
+    specialist: job.specialist,
+    vertical: job.vertical,
+    platform: job.platform,
+    has_media: Boolean(job.mediaFileId),
+  });
 
   await onProgress("Chief of Staff is reviewing...");
   let review = await chiefReview(call, job, draftText);
   if (review.decision === "RETURN") {
-    await onProgress("Returned by the Chief of Staff. Content Agent is redrafting...");
-    draftText = await contentRedraft(call, job, review.draft, review.notes);
+    await onProgress(`Returned by the Chief of Staff. ${name} is redrafting...`);
+    draftText = await specialistRedraft(call, job, review.draft, review.notes);
     review = await chiefReview(call, job, draftText);
     // One return round only; whatever the Chief of Staff holds now goes on.
   }
@@ -193,8 +236,8 @@ export async function runContentPipeline(job, { call = callAgent, onProgress = a
         `Draft still violates the constitution after ${round + 1} audit round(s): ${audit.notes}`;
       break;
     }
-    await onProgress("FIX verdict. Content Agent is redrafting...");
-    draftText = await contentRedraft(call, job, draftText, audit.notes);
+    await onProgress(`FIX verdict. ${name} is redrafting...`);
+    draftText = await specialistRedraft(call, job, draftText, audit.notes);
     drafts.update(id, { content: draftText });
   }
 
@@ -221,4 +264,17 @@ export async function runContentPipeline(job, { call = callAgent, onProgress = a
   });
   logEvent("draft_queued", { draft_id: id, verdict: audit.verdict });
   return drafts.get(id);
+}
+
+/** The M2 entry point: a Content Agent pass from a /draft brief. */
+export async function runContentPipeline(job, deps) {
+  return runSpecialistPipeline(
+    {
+      specialist: "content",
+      assignment: contentBrief(job),
+      vertical: job.vertical,
+      platform: job.platform,
+    },
+    deps,
+  );
 }

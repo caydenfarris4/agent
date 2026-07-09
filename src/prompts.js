@@ -29,6 +29,22 @@ export function saveConstitution(text) {
   fs.writeFileSync(CONSTITUTION_PATH, text, "utf8");
 }
 
+/**
+ * Append a ratified amendment to the constitution text and return the new
+ * document. Pure function so the /amend flow is testable without touching
+ * the real file.
+ */
+export function formatAmendment(doc, amendmentText, date) {
+  const n = (doc.match(/\*\*Amendment \d+/g) || []).length + 1;
+  let out = doc.trimEnd() + "\n";
+  if (!out.includes("## AMENDMENTS")) {
+    out +=
+      "\n---\n\n## AMENDMENTS\n\nRatified by Cayden via /amend. Each amendment takes effect on every agent's next call.\n";
+  }
+  out += `\n**Amendment ${n} (${date}).** ${amendmentText}\n`;
+  return out;
+}
+
 function extractSection(document, heading) {
   const start = document.indexOf(heading);
   if (start === -1) {

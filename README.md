@@ -33,7 +33,7 @@ The three governing documents live in this repo and are loaded at runtime:
 
 - [x] **M1** — Telegram bot skeleton: `/status`, `/pause`, `/resume`, owner lock, SQLite, prompt loading
 - [x] **M2** — Full pipeline pass: `/draft` → Content draft → Chief of Staff review → Critique audit → approval buttons → dry-run publish, plus `/queue` and Chief of Staff chat
-- [ ] **M3** — Remaining specialists and commands
+- [x] **M3** — Remaining specialists and commands: `/book`, `/app`, `/kdp`, `/idea`, `/outreach` (targets + pitches behind approval), `/amend` (Critique restates, you ratify), `/reply` (Engagement Agent), photo/video asset drops (photos go to the Content Agent as images)
 - [ ] **M4** — Schedulers: daily Chief of Staff run, weekly plan + analytics report
 - [ ] **M5** — Postiz integration (still dry run)
 
