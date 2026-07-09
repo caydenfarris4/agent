@@ -1,0 +1,248 @@
+import cron from "node-cron";
+import { config } from "./config.js";
+import { db, drafts, outreach, metrics, kdp, settings, getOwnerId, isPaused, logEvent } from "./db.js";
+import { callAgent } from "./agents/client.js";
+import { runContentPipeline } from "./agents/pipeline.js";
+import { sendApprovalCard } from "./telegram/approvals.js";
+
+const LAUNCH_DATE = "2026-08-11";
+// Daily run after the Monday plan so the plan lands first.
+const DAILY_CRON = "0 9 * * *";
+const WEEKLY_PLAN_CRON = "0 8 * * 1";
+const WEEKLY_REPORT_CRON = "0 18 * * 0";
+const MAX_DAILY_ASSIGNMENTS = 3;
+
+function daysToLaunch() {
+  return Math.ceil((new Date(LAUNCH_DATE) - Date.now()) / 86400000);
+}
+
+// --- Shared data gathering ---------------------------------------------------
+
+function weekActivity() {
+  const published = db
+    .prepare(
+      "SELECT platform, vertical, substr(content, 1, 90) AS excerpt, quality_flag FROM drafts WHERE status = 'published' AND published_at >= datetime('now', '-7 days') ORDER BY published_at",
+    )
+    .all();
+  const rejected = db
+    .prepare(
+      "SELECT platform, vertical, rejection_reason, substr(content, 1, 90) AS excerpt FROM drafts WHERE status = 'rejected' AND updated_at >= datetime('now', '-7 days')",
+    )
+    .all();
+  const queued = db
+    .prepare("SELECT COUNT(*) AS n FROM drafts WHERE status = 'queued'")
+    .get().n;
+  return { published, rejected, queued };
+}
+
+function systemContext() {
+  const { published, rejected, queued } = weekActivity();
+  const lines = [
+    `Today: ${new Date().toDateString()}. Days to launch: ${daysToLaunch()}.`,
+    `Publishing: ${isPaused() ? "PAUSED (drafting continues)" : "active"}${config.dryRun ? ", DRY RUN week" : ""}.`,
+    `Approval queue depth: ${queued}.`,
+    `Published last 7 days (${published.length}):`,
+    ...published.map((p) => `  ${p.platform}/${p.vertical}: ${p.excerpt}${p.quality_flag ? " [was quality-flagged]" : ""}`),
+    `Rejected last 7 days (${rejected.length}):`,
+    ...rejected.map((r) => `  ${r.platform}/${r.vertical}: "${r.rejection_reason || "no reason"}" on: ${r.excerpt}`),
+  ];
+  const latestKdp = kdp.latest();
+  if (latestKdp) lines.push(`Latest KDP entry (raw): ${latestKdp.raw_text}`);
+  const oc = outreach.counts();
+  if (oc.length > 0) {
+    lines.push(`Outreach pipeline: ${oc.map((r) => `${r.status}=${r.n}`).join(", ")}`);
+  }
+  for (const v of ["book", "app"]) {
+    const m = metrics.recent(v, 6);
+    if (m.length > 0) {
+      lines.push(`Recent ${v} metrics: ${m.map((x) => `${x.metric}=${x.value}`).join(", ")}`);
+    }
+  }
+  const plan = settings.get("weekly_plan");
+  if (plan) lines.push("", "Current weekly plan:", plan);
+  return lines.join("\n");
+}
+
+// --- Daily Chief of Staff run --------------------------------------------------
+
+/** Parse "ASSIGN: platform | vertical | brief" lines from the CoS reply. */
+export function parseAssignments(text, cap = MAX_DAILY_ASSIGNMENTS) {
+  const out = [];
+  for (const m of text.matchAll(/^ASSIGN:\s*([a-z]+)\s*\|\s*(book|app)\s*\|\s*(.+)$/gim)) {
+    out.push({ platform: m[1].toLowerCase(), vertical: m[2].toLowerCase(), brief: m[3].trim() });
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+export async function runDaily(api, { call = callAgent } = {}) {
+  const owner = getOwnerId();
+  if (!owner || !config.anthropicApiKey) return { skipped: true };
+
+  const reply = await call("chief_of_staff", [
+    {
+      role: "user",
+      content: [
+        "Daily planning run. Decide today's content assignments within the Constitution's cadence (4 to 5 posts per week per platform pre-launch; check what already went out this week below).",
+        "",
+        systemContext(),
+        "",
+        `Respond with at most ${MAX_DAILY_ASSIGNMENTS} assignment lines, each in exactly this format:`,
+        "ASSIGN: platform | vertical | one-line brief for the Content Agent",
+        "(platforms: linkedin, instagram, x. verticals: book, app.)",
+        "If nothing should be drafted today, respond with the single line ASSIGN: NONE and one line explaining why.",
+      ].join("\n"),
+    },
+  ]);
+
+  const assignments = parseAssignments(reply);
+  logEvent("daily_run", { assignments: assignments.length });
+  if (assignments.length === 0) {
+    await api.sendMessage(owner, `Chief of Staff daily run: nothing to draft today.\n${reply.trim()}`);
+    return { assignments: 0 };
+  }
+
+  await api.sendMessage(
+    owner,
+    `Chief of Staff daily run: ${assignments.length} draft${assignments.length === 1 ? "" : "s"} incoming as one bundle.`,
+  );
+  for (const a of assignments) {
+    try {
+      const draft = await runContentPipeline(a, { call });
+      await sendApprovalCard(api, owner, draft);
+    } catch (err) {
+      console.error("Daily pipeline error:", err);
+      await api.sendMessage(owner, `Pipeline failed for ${a.platform}/${a.vertical}: ${err.message}`);
+    }
+  }
+  return { assignments: assignments.length };
+}
+
+// --- Weekly plan -----------------------------------------------------------------
+
+export async function runWeeklyPlan(api, { call = callAgent } = {}) {
+  const owner = getOwnerId();
+  if (!owner || !config.anthropicApiKey) return { skipped: true };
+
+  const plan = await call("chief_of_staff", [
+    {
+      role: "user",
+      content: [
+        "Weekly planning session. Deliver the plan for the coming week per Article XI: the week's content themes per platform, the outreach slate (targets awaiting approval and next moves), and exactly one data-driven change based on last week, with the specific reason named.",
+        "",
+        systemContext(),
+        "",
+        "Write it as the Telegram message Cayden receives: short, direct, decision-ready, lead with anything that needs his attention. Plain text, internal lists permitted.",
+      ].join("\n"),
+    },
+  ], { maxTokens: 2048 });
+
+  settings.set("weekly_plan", plan.trim());
+  settings.set("weekly_plan_date", new Date().toISOString());
+  logEvent("weekly_plan", {});
+  await api.sendMessage(owner, plan.trim());
+  return { sent: true };
+}
+
+// --- Weekly analytics report --------------------------------------------------------
+
+export async function runWeeklyReport(api, { call = callAgent } = {}) {
+  const owner = getOwnerId();
+  if (!owner || !config.anthropicApiKey) return { skipped: true };
+
+  const context = systemContext();
+  const halves = [];
+  for (const [agentKey, vertical] of [["book_growth", "book"], ["app_growth", "app"]]) {
+    halves.push(
+      await call(agentKey, [
+        {
+          role: "user",
+          content: [
+            `Produce your ${vertical} half of the weekly report per your charter: what happened, why as best the data shows, what to change, with the reason named. State uncertainty plainly when the data is thin; never estimate without labeling it.`,
+            "",
+            context,
+            "",
+            "Under 10 lines, plain text.",
+          ].join("\n"),
+        },
+      ]),
+    );
+  }
+
+  const report = await call("chief_of_staff", [
+    {
+      role: "user",
+      content: [
+        "Assemble the weekly two-vertical analytics report for Cayden per Article XI. The specialist halves follow; do not inflate or soften them.",
+        "",
+        "BOOK GROWTH HALF:",
+        halves[0],
+        "",
+        "APP GROWTH HALF:",
+        halves[1],
+        "",
+        "Deliver the report as the Telegram message Cayden receives: both verticals clearly separated, truth first, recommendations with the reason named. Plain text.",
+      ].join("\n"),
+    },
+  ], { maxTokens: 2048 });
+
+  logEvent("weekly_report", {});
+  await api.sendMessage(owner, report.trim());
+  return { sent: true };
+}
+
+// --- Wiring ------------------------------------------------------------------------
+
+export function registerM4(bot, { requireApiKey }) {
+  bot.command("plan", async (ctx) => {
+    const offline = requireApiKey();
+    if (offline) return ctx.reply(offline);
+    const arg = (ctx.match || "").trim().toLowerCase();
+    const stored = settings.get("weekly_plan");
+    const storedAt = settings.get("weekly_plan_date");
+    const fresh = storedAt && Date.now() - new Date(storedAt).getTime() < 7 * 86400000;
+    if (stored && fresh && arg !== "new") {
+      return ctx.reply(`${stored}\n\n(From this week's session. /plan new regenerates.)`);
+    }
+    await ctx.reply("Running the weekly planning session...");
+    try {
+      await runWeeklyPlan(ctx.api);
+    } catch (err) {
+      await ctx.reply(`Planning session failed: ${err.message}`);
+    }
+  });
+
+  bot.command("report", async (ctx) => {
+    const offline = requireApiKey();
+    if (offline) return ctx.reply(offline);
+    await ctx.reply("Assembling the two-vertical report...");
+    try {
+      await runWeeklyReport(ctx.api);
+    } catch (err) {
+      await ctx.reply(`Report failed: ${err.message}`);
+    }
+  });
+}
+
+export function startSchedulers(bot) {
+  if (!config.schedulersEnabled) {
+    console.log("Schedulers disabled (ENABLE_SCHEDULERS=false).");
+    return;
+  }
+  const tz = { timezone: config.timezone };
+  const guard = (name, fn) => async () => {
+    try {
+      const r = await fn(bot.api);
+      if (r?.skipped) console.log(`Scheduler ${name}: skipped (no owner or no API key).`);
+    } catch (err) {
+      console.error(`Scheduler ${name} failed:`, err);
+      logEvent("scheduler_error", { name, message: String(err?.message ?? err) });
+    }
+  };
+  cron.schedule(DAILY_CRON, guard("daily", runDaily), tz);
+  cron.schedule(WEEKLY_PLAN_CRON, guard("weekly_plan", runWeeklyPlan), tz);
+  cron.schedule(WEEKLY_REPORT_CRON, guard("weekly_report", runWeeklyReport), tz);
+  console.log(
+    `Schedulers armed (${config.timezone}): daily CoS run 09:00, weekly plan Mon 08:00, weekly report Sun 18:00.`,
+  );
+}

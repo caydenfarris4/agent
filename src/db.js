@@ -89,6 +89,13 @@ export const settings = {
   },
 };
 
+/** The owner's Telegram user id (== private chat id): env pin or claimed via /start. */
+export function getOwnerId() {
+  if (config.ownerId) return config.ownerId;
+  const stored = settings.get("owner_id");
+  return stored ? Number(stored) : null;
+}
+
 export function isPaused() {
   return settings.get("paused", "0") === "1";
 }

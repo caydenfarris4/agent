@@ -2,6 +2,7 @@ import { config, assertStartupConfig } from "./config.js";
 import { logEvent } from "./db.js";
 import { AGENT_KEYS, buildSystemPrompt } from "./prompts.js";
 import { createBot, registerCommandMenu } from "./telegram/bot.js";
+import { startSchedulers } from "./scheduler.js";
 
 const problems = assertStartupConfig();
 if (problems.length > 0) {
@@ -29,6 +30,7 @@ const bot = createBot();
 
 async function main() {
   await registerCommandMenu(bot);
+  startSchedulers(bot);
   logEvent("startup", { dry_run: config.dryRun });
   console.log(
     `Starting Telegram bot (long polling). DRY_RUN=${config.dryRun}, model=${config.agentModel}`,

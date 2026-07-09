@@ -22,6 +22,10 @@ export const config = {
 
   dbPath: process.env.DB_PATH || "./data/launch.db",
   timezone: process.env.TZ || "America/Denver",
+
+  // Set ENABLE_SCHEDULERS=false to run the bot without the M4 cron jobs
+  // (useful in development so a test bot doesn't run the daily pipeline).
+  schedulersEnabled: bool(process.env.ENABLE_SCHEDULERS, true),
 };
 
 export function assertStartupConfig() {

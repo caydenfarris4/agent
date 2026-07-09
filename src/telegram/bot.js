@@ -1,12 +1,13 @@
 import { Bot } from "grammy";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { config } from "../config.js";
-import { db, drafts, settings, isPaused, setPaused, logEvent } from "../db.js";
+import { db, drafts, settings, getOwnerId, isPaused, setPaused, logEvent } from "../db.js";
 import { callAgent } from "../agents/client.js";
 import { runContentPipeline } from "../agents/pipeline.js";
 import { publishDraft, flushApproved } from "../publish.js";
 import { sendApprovalCard } from "./approvals.js";
 import { registerM3, parseTargeting } from "./m3.js";
+import { registerM4 } from "../scheduler.js";
 
 export function createBot() {
   // Honor HTTPS_PROXY when present (e.g. sandboxed/corporate environments).
@@ -31,16 +32,10 @@ export function createBot() {
   // --- Owner lock -----------------------------------------------------------
   // Only Cayden talks to this bot. Owner is TELEGRAM_OWNER_ID if set;
   // otherwise the first person to send /start claims ownership.
-  function ownerId() {
-    if (config.ownerId) return config.ownerId;
-    const stored = settings.get("owner_id");
-    return stored ? Number(stored) : null;
-  }
-
   bot.use(async (ctx, next) => {
     const from = ctx.from?.id;
     if (!from) return;
-    const owner = ownerId();
+    const owner = getOwnerId();
     if (owner === null) {
       // Unclaimed: only /start may claim ownership.
       if (ctx.message?.text?.startsWith("/start")) {
@@ -221,16 +216,8 @@ export function createBot() {
   // --- M3: specialists, commands, asset drops --------------------------------
   registerM3(bot, { requireApiKey });
 
-  // --- Commands arriving in later milestones ---------------------------------
-  const pending = {
-    plan: "M4",
-    report: "M4",
-  };
-  for (const [cmd, milestone] of Object.entries(pending)) {
-    bot.command(cmd, async (ctx) => {
-      await ctx.reply(`/${cmd} lands in milestone ${milestone}. Not wired up yet.`);
-    });
-  }
+  // --- M4: /plan and /report on demand (schedulers start in index.js) --------
+  registerM4(bot, { requireApiKey });
 
   // --- Free-form text: rejection reasons, then Chief of Staff chat -----------
   bot.on("message:text", async (ctx) => {
