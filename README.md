@@ -99,6 +99,37 @@ needed** — outbound HTTPS is enough.
 
 5. **Verify from your phone:** send `/start`, then `/status`.
 
+## Going live with Postiz (after the dry-run week)
+
+The approve button already publishes for real; it just needs the self-hosted
+Postiz stack next to the bot. Honest prerequisites first: **self-hosted
+Postiz requires your own developer app on each network** (a LinkedIn app, an
+X/Twitter developer app, a Meta app for Instagram), and their OAuth flows
+require **HTTPS on a real domain** pointing at your VPS. Budget an evening
+for this, once. The steps:
+
+1. **Domain + TLS**: point a subdomain (e.g. `postiz.yourdomain.com`) at the
+   VPS and put Caddy or a Cloudflare Tunnel in front of port 5000.
+2. **Configure** in `.env`: `POSTIZ_MAIN_URL=https://postiz.yourdomain.com`,
+   `POSTIZ_JWT_SECRET` (long random string), `POSTIZ_DB_PASSWORD`.
+3. **Start the stack**: `docker compose --profile postiz up -d --build`
+   (plain `docker compose up -d` keeps running the bot alone).
+4. **Create your Postiz account** at the URL, then set
+   `POSTIZ_DISABLE_REGISTRATION=true` and restart so registration closes.
+5. **Create the provider apps** (LinkedIn, X, Meta for Instagram; Instagram
+   API posting additionally requires a Business/Creator account linked to a
+   Facebook page), put their client ids/secrets in `postiz.env` (gitignored),
+   and connect each channel in the Postiz UI. The
+   [Postiz providers docs](https://docs.postiz.com/providers) walk through
+   each one.
+6. **Point the bot at it** in `.env`:
+   `POSTIZ_API_URL=http://postiz:5000/api/public/v1` and `POSTIZ_API_KEY`
+   from Postiz settings. Restart the bot, run `/channels` in Telegram to map
+   linkedin/instagram/x.
+7. **Only when the dry-run week is explicitly complete**: set
+   `DRY_RUN=false` and restart. Per the build guide, aim the first live post
+   at a private test channel.
+
 ### Operations
 
 ```sh

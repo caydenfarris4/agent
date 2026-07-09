@@ -10,3 +10,83 @@ services:
       # Mount prompts so /amend edits and manual constitution changes persist
       # and take effect without rebuilding the image.
       - ./prompts:/app/prompts
+
+  # --- Self-hosted Postiz (publishing) ---------------------------------------
+  # Optional profile: `docker compose --profile postiz up -d --build` starts
+  # the bot AND the publishing stack; plain `docker compose up -d` starts the
+  # bot alone (fine for the dry-run week).
+  #
+  # One-time setup after first start: see "Going live with Postiz" in README.
+  # The bot reaches it inside the compose network at
+  #   POSTIZ_API_URL=http://postiz:5000/api/public/v1
+  postiz:
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    profiles: [postiz]
+    restart: unless-stopped
+    environment:
+      # Public URL of your Postiz UI. Social-network OAuth requires HTTPS on
+      # a real domain (e.g. behind Caddy or a Cloudflare Tunnel).
+      MAIN_URL: ${POSTIZ_MAIN_URL:-http://localhost:5000}
+      FRONTEND_URL: ${POSTIZ_MAIN_URL:-http://localhost:5000}
+      NEXT_PUBLIC_BACKEND_URL: ${POSTIZ_MAIN_URL:-http://localhost:5000}/api
+      # Must be set in .env (any long random string) when using the postiz
+      # profile; Postiz refuses to start without it.
+      JWT_SECRET: ${POSTIZ_JWT_SECRET:-}
+      DATABASE_URL: postgresql://postiz:${POSTIZ_DB_PASSWORD:-postiz}@postiz-postgres:5432/postiz
+      REDIS_URL: redis://postiz-redis:6379
+      BACKEND_INTERNAL_URL: http://localhost:3000
+      IS_GENERAL: "true"
+      DISABLE_REGISTRATION: ${POSTIZ_DISABLE_REGISTRATION:-false}
+      STORAGE_PROVIDER: local
+      UPLOAD_DIRECTORY: /uploads
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: /uploads
+    # Provider app credentials (LINKEDIN_CLIENT_ID/SECRET, X_API_KEY/SECRET,
+    # Meta app keys for Instagram) live in postiz.env, gitignored, so the
+    # bot's secrets and Postiz's stay separate.
+    env_file:
+      - path: postiz.env
+        required: false
+    volumes:
+      - postiz-config:/config
+      - postiz-uploads:/uploads
+    ports:
+      - "5000:5000"
+    depends_on:
+      postiz-postgres:
+        condition: service_healthy
+      postiz-redis:
+        condition: service_healthy
+
+  postiz-postgres:
+    image: postgres:17-alpine
+    profiles: [postiz]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postiz
+      POSTGRES_PASSWORD: ${POSTIZ_DB_PASSWORD:-postiz}
+      POSTGRES_DB: postiz
+    volumes:
+      - postiz-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postiz -d postiz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postiz-redis:
+    image: redis:7.2-alpine
+    profiles: [postiz]
+    restart: unless-stopped
+    volumes:
+      - postiz-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postiz-config:
+  postiz-uploads:
+  postiz-db:
+  postiz-redis-data:
