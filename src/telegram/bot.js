@@ -4,7 +4,8 @@ import { config } from "../config.js";
 import { db, drafts, settings, getOwnerId, isPaused, setPaused, logEvent } from "../db.js";
 import { callAgent } from "../agents/client.js";
 import { runContentPipeline } from "../agents/pipeline.js";
-import { publishDraft, flushApproved } from "../publish.js";
+import { publishDraft, flushApproved, describePublishResult } from "../publish.js";
+import { postizConfigured, listIntegrations, mapPlatforms } from "../postiz.js";
 import { sendApprovalCard } from "./approvals.js";
 import { registerM3, parseTargeting } from "./m3.js";
 import { registerM4 } from "../scheduler.js";
@@ -163,20 +164,9 @@ export function createBot() {
     await ctx.answerCallbackQuery({ text: "Approved." });
     await ctx.editMessageReplyMarkup(); // remove the buttons
 
-    const result = publishDraft(drafts.get(id));
-    if (result.published) {
-      await ctx.reply(
-        `Draft #${id} approved and published${result.dryRun ? " (dry run: logged, not posted)" : ""}.`,
-      );
-    } else if (result.reason === "paused") {
-      await ctx.reply(
-        `Draft #${id} approved. Publishing is paused; it goes out on /resume.`,
-      );
-    } else {
-      await ctx.reply(
-        `Draft #${id} approved. No publisher is connected yet (Postiz lands in M5), so it stays in the approved list.`,
-      );
-    }
+    const fresh = drafts.get(id);
+    const result = await publishDraft(fresh);
+    await ctx.reply(describePublishResult(fresh, result));
   });
 
   bot.callbackQuery(/^reject:(\d+)$/, async (ctx) => {
@@ -205,12 +195,47 @@ export function createBot() {
   bot.command("resume", async (ctx) => {
     setPaused(false);
     logEvent("resumed", {});
-    const flushed = flushApproved().filter((r) => r.result.published);
-    let line = "Publishing resumed.";
-    if (flushed.length > 0) {
-      line += ` ${flushed.length} approved draft${flushed.length === 1 ? "" : "s"} published${config.dryRun ? " (dry run)" : ""}.`;
+    const flushed = await flushApproved();
+    const lines = ["Publishing resumed."];
+    for (const { draft, result } of flushed) {
+      lines.push(describePublishResult(draft, result));
     }
-    await ctx.reply(line);
+    await ctx.reply(lines.join("\n"));
+  });
+
+  // --- /channels: connect platform names to Postiz channels (M5) -------------
+  bot.command("channels", async (ctx) => {
+    if (!postizConfigured()) {
+      return ctx.reply(
+        "Postiz isn't configured. Set POSTIZ_API_URL and POSTIZ_API_KEY once the dry-run week is complete.",
+      );
+    }
+    try {
+      const integrations = await listIntegrations();
+      if (integrations.length === 0) {
+        return ctx.reply("Postiz responded but has no connected channels yet.");
+      }
+      const map = mapPlatforms(integrations);
+      settings.set("postiz_map", JSON.stringify(map));
+      logEvent("postiz_mapped", map);
+      const lines = ["Postiz channels:"];
+      for (const i of integrations) {
+        lines.push(`  ${i.identifier}: ${i.name}${i.disabled ? " (disabled)" : ""}`);
+      }
+      lines.push("");
+      const mapped = Object.entries(map);
+      lines.push(
+        mapped.length
+          ? `Mapped for publishing: ${mapped.map(([p, id]) => `${p} -> ${id}`).join(", ")}`
+          : "No linkedin/instagram/x channels found to map.",
+      );
+      for (const p of ["linkedin", "instagram", "x"]) {
+        if (!map[p]) lines.push(`Missing: ${p} (connect it in Postiz, then rerun /channels)`);
+      }
+      await ctx.reply(lines.join("\n"));
+    } catch (err) {
+      await ctx.reply(`Postiz call failed: ${err.message}`);
+    }
   });
 
   // --- M3: specialists, commands, asset drops --------------------------------
@@ -292,6 +317,7 @@ export async function registerCommandMenu(bot) {
     { command: "kdp", description: "Log weekly KDP sales figures" },
     { command: "pause", description: "Freeze all publishing instantly" },
     { command: "resume", description: "Unfreeze publishing" },
+    { command: "channels", description: "List and map Postiz channels" },
     { command: "amend", description: "Propose a Constitution change" },
   ]);
 }
