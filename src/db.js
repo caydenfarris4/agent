@@ -89,6 +89,26 @@ export const settings = {
   },
 };
 
+/**
+ * Approved links and assets (Amazon URL, tracked short links, email list).
+ * Agents may only use URLs from here; /links manages it from Telegram.
+ */
+export const links = {
+  all() {
+    return JSON.parse(settings.get("links", "{}"));
+  },
+  set(name, url) {
+    const a = this.all();
+    a[name] = url;
+    settings.set("links", JSON.stringify(a));
+  },
+  remove(name) {
+    const a = this.all();
+    delete a[name];
+    settings.set("links", JSON.stringify(a));
+  },
+};
+
 /** The owner's Telegram user id (== private chat id): env pin or claimed via /start. */
 export function getOwnerId() {
   if (config.ownerId) return config.ownerId;

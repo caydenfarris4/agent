@@ -1,7 +1,7 @@
 import { Bot } from "grammy";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { config } from "../config.js";
-import { db, drafts, settings, getOwnerId, isPaused, setPaused, logEvent } from "../db.js";
+import { db, drafts, settings, links, getOwnerId, isPaused, setPaused, logEvent } from "../db.js";
 import { callAgent } from "../agents/client.js";
 import { runContentPipeline } from "../agents/pipeline.js";
 import { publishDraft, flushApproved, describePublishResult } from "../publish.js";
@@ -99,6 +99,9 @@ export function createBot() {
         ? `Waiting on you: ${waiting.join(", ")}`
         : "Waiting on you: nothing",
     );
+    if (!links.all().amazon) {
+      lines.push("Amazon link not set; drafts use a placeholder. Fix: /links amazon <url>");
+    }
     await ctx.reply(lines.join("\n"));
   });
 
@@ -271,9 +274,13 @@ export function createBot() {
     if (offline) return ctx.reply(offline);
 
     const queued = drafts.listByStatus("queued").length;
+    const linkList = Object.entries(links.all())
+      .map(([k, v]) => `${k}=${v}`)
+      .join(", ");
     const context =
       `[System context: publishing is ${isPaused() ? "paused" : "active"}` +
       `${config.dryRun ? ", dry run" : ""}; ${queued} draft(s) in the approval queue. ` +
+      `Approved links: ${linkList || "none set yet"}. ` +
       "Cayden says:]\n\n";
 
     chiefHistory.push({ role: "user", content: context + text });
@@ -318,6 +325,7 @@ export async function registerCommandMenu(bot) {
     { command: "pause", description: "Freeze all publishing instantly" },
     { command: "resume", description: "Unfreeze publishing" },
     { command: "channels", description: "List and map Postiz channels" },
+    { command: "links", description: "Approved links the agents may use" },
     { command: "amend", description: "Propose a Constitution change" },
   ]);
 }

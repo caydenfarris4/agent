@@ -2,7 +2,7 @@ import https from "node:https";
 import { InlineKeyboard } from "grammy";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { config } from "../config.js";
-import { db, outreach, metrics, kdp, settings, logEvent } from "../db.js";
+import { db, outreach, metrics, kdp, settings, links, logEvent } from "../db.js";
 import { callAgent } from "../agents/client.js";
 import { runSpecialistPipeline, parseFields } from "../agents/pipeline.js";
 import { loadConstitution, saveConstitution, formatAmendment } from "../prompts.js";
@@ -384,6 +384,45 @@ export function registerM3(bot, { requireApiKey }) {
     await ctx.answerCallbackQuery({ text: "Cancelled." });
     await ctx.editMessageReplyMarkup();
     await ctx.reply("Amendment dropped. The Constitution is unchanged.");
+  });
+
+  // --- /links: approved links the agents may use --------------------------------
+  bot.command("links", async (ctx) => {
+    const args = (ctx.match || "").trim();
+
+    if (!args) {
+      const all = Object.entries(links.all());
+      const lines = all.length
+        ? ["Approved links (agents use these exact URLs):", ...all.map(([k, v]) => `  ${k}: ${v}`)]
+        : ["No links set yet. Agents use the placeholder [AMAZON LINK] until you add the real one."];
+      lines.push(
+        "",
+        "Set one: /links <name> <url>",
+        "Remove one: /links remove <name>",
+        "Recognized names: amazon (the purchase link), amazon_linkedin / amazon_instagram / amazon_x (tracked short links per platform), email_list, waitlist. Any other name works too.",
+      );
+      return ctx.reply(lines.join("\n"));
+    }
+
+    const rm = args.match(/^remove\s+(\S+)$/i);
+    if (rm) {
+      const name = rm[1].toLowerCase();
+      if (!links.all()[name]) return ctx.reply(`No link named "${name}".`);
+      links.remove(name);
+      logEvent("link_removed", { name });
+      return ctx.reply(`Link "${name}" removed.`);
+    }
+
+    const m = args.match(/^(\S+)\s+(https?:\/\/\S+)$/i);
+    if (!m) {
+      return ctx.reply("Usage: /links <name> <url>  (the url must start with http). Bare /links lists everything.");
+    }
+    const name = m[1].toLowerCase();
+    links.set(name, m[2]);
+    logEvent("link_set", { name });
+    return ctx.reply(
+      `Link "${name}" saved. Every agent sees it from the next draft on; the Critique Agent rejects drafts that use any URL not on this list.`,
+    );
   });
 
   // --- /reply: Engagement Agent drafts a comment reply through the queue ------

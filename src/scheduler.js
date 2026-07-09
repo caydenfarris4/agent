@@ -1,6 +1,6 @@
 import cron from "node-cron";
 import { config } from "./config.js";
-import { db, drafts, outreach, metrics, kdp, settings, getOwnerId, isPaused, logEvent } from "./db.js";
+import { db, drafts, outreach, metrics, kdp, settings, links, getOwnerId, isPaused, logEvent } from "./db.js";
 import { callAgent } from "./agents/client.js";
 import { runContentPipeline } from "./agents/pipeline.js";
 import { sendApprovalCard } from "./telegram/approvals.js";
@@ -58,6 +58,12 @@ function systemContext() {
       lines.push(`Recent ${v} metrics: ${m.map((x) => `${x.metric}=${x.value}`).join(", ")}`);
     }
   }
+  const linkEntries = Object.entries(links.all());
+  lines.push(
+    linkEntries.length
+      ? `Approved links: ${linkEntries.map(([k, v]) => `${k}=${v}`).join(", ")}`
+      : "Approved links: none set yet (drafts carry the [AMAZON LINK] placeholder).",
+  );
   const plan = settings.get("weekly_plan");
   if (plan) lines.push("", "Current weekly plan:", plan);
   return lines.join("\n");

@@ -1,5 +1,5 @@
 import { callAgent } from "./client.js";
-import { drafts, logEvent } from "../db.js";
+import { drafts, links, logEvent } from "../db.js";
 
 // One extra specialist pass after a FIX verdict; a second FIX escalates to
 // Cayden instead of looping (build guide: FIX loops back once with the
@@ -34,6 +34,32 @@ export function parseFields(text) {
   }
   for (const k of Object.keys(out)) out[k] = out[k].trim();
   return out;
+}
+
+/**
+ * The approved-links block appended to every specialist assignment and shown
+ * to the Critique Agent, so real URLs land in drafts and invented ones fail
+ * the audit.
+ */
+export function linksBlock(platform) {
+  const all = links.all();
+  const entries = Object.entries(all);
+  if (entries.length === 0) {
+    return [
+      "",
+      "No approved links are configured yet. If the piece needs the Amazon link (or any URL), write the placeholder [AMAZON LINK] instead of inventing one, and Cayden will be nudged to set /links.",
+    ].join("\n");
+  }
+  return [
+    "",
+    "Approved links. Use these exact URLs; never invent, alter, or shorten them:",
+    ...entries.map(([k, v]) => `  ${k}: ${v}`),
+    platform && (all[`amazon_${platform}`] || all.amazon)
+      ? `For book content on ${platform}, the Amazon destination is: ${all[`amazon_${platform}`] || all.amazon}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function contentBrief({ brief, vertical, platform }) {
@@ -133,6 +159,7 @@ async function critiqueAudit(call, job, draftText, rationale) {
     "",
     "DRAFT:",
     draftText,
+    linksBlock(job.platform),
     "",
     "Respond in exactly this format, nothing before or after:",
     "VERDICT: PASS or FIX or ESCALATE",
@@ -183,6 +210,8 @@ async function chiefEscalationPosition(call, job, draftText, critiquePosition) {
  * @param {{call?: Function, onProgress?: (line: string) => Promise<void>}} deps
  */
 export async function runSpecialistPipeline(job, { call = callAgent, onProgress = async () => {} } = {}) {
+  // Every specialist sees the approved links with its assignment.
+  job = { ...job, assignment: job.assignment + "\n" + linksBlock(job.platform) };
   const name = SPECIALIST_NAMES[job.specialist] || job.specialist;
   await onProgress(`${name} is drafting...`);
   let draftText = await specialistDraft(call, job);
