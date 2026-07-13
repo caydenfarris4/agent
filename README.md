@@ -35,7 +35,7 @@ The three governing documents live in this repo and are loaded at runtime:
 - [ ] **M2** — Full pipeline pass: Content draft → Critique audit → approval buttons → dry-run publish
 - [ ] **M3** — Remaining specialists and commands
 - [ ] **M4** — Schedulers: daily Chief of Staff run, weekly plan + analytics report
-- [ ] **M5** — Postiz integration (still dry run)
+- [x] **M5** — Postiz integration (still dry run): API client, `/postiz` connection check, startup check
 
 ## Local setup
 
@@ -60,7 +60,7 @@ See `.env.example` for the full list. The important ones:
 | `ANTHROPIC_API_KEY` | Claude API key (needed from M2 on). |
 | `AGENT_MODEL` | Defaults to `claude-sonnet-4-6`. |
 | `DRY_RUN` | Defaults to `true`. Publish step logs instead of posting. |
-| `POSTIZ_API_URL` / `POSTIZ_API_KEY` | Leave empty until the dry-run week is complete. |
+| `POSTIZ_API_URL` / `POSTIZ_API_KEY` | Key from Postiz Settings → Public API. URL defaults to the cloud API; self-hosted instances set it explicitly. Safe to set during the dry-run week — `DRY_RUN=true` still blocks real posts. Verify with `/postiz`. |
 | `DB_PATH` | SQLite file location. Defaults to `./data/launch.db`. |
 | `TZ` | Timezone for the daily/weekly schedulers. |
 

@@ -2,6 +2,7 @@ import { Bot } from "grammy";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { config } from "../config.js";
 import { db, settings, isPaused, setPaused, logEvent } from "../db.js";
+import { checkConnection, isConfigured } from "../postiz.js";
 
 export function createBot() {
   // Honor HTTPS_PROXY when present (e.g. sandboxed/corporate environments).
@@ -49,7 +50,7 @@ export function createBot() {
   bot.command("start", async (ctx) => {
     await ctx.reply(
       "Under Construction launch system online.\n\n" +
-        "Commands: /status /queue /plan /report /book /app /idea /outreach /kdp /pause /resume /amend",
+        "Commands: /status /queue /plan /report /book /app /idea /outreach /kdp /postiz /pause /resume /amend",
     );
   });
 
@@ -106,6 +107,38 @@ export function createBot() {
     await ctx.reply("Publishing resumed.");
   });
 
+  // --- /postiz: verify the publishing connection -----------------------------
+  bot.command("postiz", async (ctx) => {
+    if (!isConfigured()) {
+      await ctx.reply(
+        "Postiz is not configured yet. Set POSTIZ_API_URL and POSTIZ_API_KEY in .env.\n" +
+          `Publishing would ${config.dryRun ? "dry-run (log only)" : "FAIL"} right now.`,
+      );
+      return;
+    }
+    const result = await checkConnection();
+    if (!result.ok) {
+      logEvent("postiz_check_failed", { error: result.error });
+      await ctx.reply(`Postiz connection FAILED:\n${result.error}`);
+      return;
+    }
+    logEvent("postiz_check_ok", {
+      channels: result.integrations.map((i) => i.identifier),
+    });
+    const channels = result.integrations.length
+      ? result.integrations
+          .map(
+            (i) =>
+              `• ${i.name} (${i.identifier})${i.disabled ? " — disabled" : ""}`,
+          )
+          .join("\n")
+      : "• none yet — connect channels in the Postiz dashboard";
+    await ctx.reply(
+      `Postiz connected (${config.postizUrl}).\nChannels:\n${channels}\n\n` +
+        `Mode: ${config.dryRun ? "DRY RUN — posts are logged, not published" : "LIVE"}`,
+    );
+  });
+
   // --- Commands arriving in later milestones ---------------------------------
   const pending = {
     queue: "M2",
@@ -148,6 +181,7 @@ export async function registerCommandMenu(bot) {
     { command: "idea", description: "Throw a thought into the loop" },
     { command: "outreach", description: "Podcast pipeline status" },
     { command: "kdp", description: "Log weekly KDP sales figures" },
+    { command: "postiz", description: "Check the Postiz publishing connection" },
     { command: "pause", description: "Freeze all publishing instantly" },
     { command: "resume", description: "Unfreeze publishing" },
     { command: "amend", description: "Propose a Constitution change" },
