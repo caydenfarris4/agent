@@ -84,12 +84,22 @@ export async function checkConnection() {
 
 // --- Publishing ---------------------------------------------------------------
 
+// Postiz validates settings per platform; these are the required minimums
+// (confirmed against the live API — missing fields are a 400).
+const DEFAULT_SETTINGS = {
+  x: { who_can_reply_post: "everyone" },
+  twitter: { who_can_reply_post: "everyone" },
+  "instagram-standalone": { post_type: "post" },
+  instagram: { post_type: "post" },
+};
+
 // Sends one piece of content to one or more connected channels.
 // This is the single choke point for outbound posts: DRY_RUN and /pause are
 // enforced here so no caller can accidentally publish around them.
-export async function createPost({ content, platform, scheduledFor }) {
+// draft: true creates a dashboard-only draft in Postiz instead of publishing.
+export async function createPost({ content, platform, scheduledFor, draft = false }) {
   if (config.dryRun) {
-    logEvent("postiz_dry_run", { platform, scheduledFor, content });
+    logEvent("postiz_dry_run", { platform, scheduledFor, draft, content });
     return { dryRun: true };
   }
   if (isPaused()) {
@@ -110,20 +120,27 @@ export async function createPost({ content, platform, scheduledFor }) {
     ? new Date(scheduledFor).toISOString()
     : new Date().toISOString();
   const result = await request("POST", "/posts", {
-    type: scheduledFor ? "schedule" : "now",
+    type: draft ? "draft" : scheduledFor ? "schedule" : "now",
     date,
     shortLink: false,
     tags: [],
     posts: integrations.map((integration) => ({
       integration: { id: integration.id },
-      value: [{ content }],
-      settings: {},
+      // image is required by the API even for text-only posts.
+      value: [{ content, image: [] }],
+      settings:
+        DEFAULT_SETTINGS[String(integration.identifier).toLowerCase()] ?? {},
     })),
   });
   logEvent("postiz_published", {
     platform,
+    draft,
     scheduledFor: date,
     integrations: integrations.map((i) => i.id),
   });
   return result;
+}
+
+export async function deletePost(postId) {
+  return request("DELETE", `/posts/${postId}`);
 }
