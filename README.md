@@ -23,6 +23,11 @@ The three governing documents live in this repo and are loaded at runtime:
   audit (PASS / FIX / ESCALATE) → Telegram approval queue (inline
   Approve/Reject buttons) → publish via Postiz.
 - **Telegram** — the only interface. Owner-locked to a single account.
+- **Media library** — send the bot a photo or video (caption becomes its
+  label) and it's mirrored into Postiz and recorded in SQLite for reuse in
+  any post. Browse with `/media`. The Postiz public API cannot list media,
+  so files uploaded manually in the Postiz dashboard are usable only when
+  composing there — everything the system posts should enter via the bot.
 - **State** — SQLite (approval queue, outreach pipeline, metrics log, KDP
   entries, audit log) at `DB_PATH`.
 - **DRY_RUN** — global env flag, defaults to `true`. Everything works

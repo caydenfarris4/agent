@@ -1,8 +1,36 @@
 import { Bot } from "grammy";
 import { HttpsProxyAgent } from "https-proxy-agent";
+import { fetch as undiciFetch, EnvHttpProxyAgent } from "undici";
 import { config } from "../config.js";
-import { db, settings, isPaused, setPaused, logEvent } from "../db.js";
-import { checkConnection, isConfigured } from "../postiz.js";
+import {
+  db,
+  settings,
+  isPaused,
+  setPaused,
+  logEvent,
+  mediaLibrary,
+} from "../db.js";
+import { checkConnection, isConfigured, uploadMedia } from "../postiz.js";
+
+// Same proxy handling as the Postiz client: Node fetch ignores HTTPS_PROXY.
+const dispatcher =
+  process.env.HTTPS_PROXY || process.env.https_proxy
+    ? new EnvHttpProxyAgent()
+    : undefined;
+
+// Pulls a file off Telegram's servers. Bot API caps getFile at 20 MB.
+async function downloadTelegramFile(api, fileId) {
+  const file = await api.getFile(fileId);
+  const url = `https://api.telegram.org/file/bot${config.telegramToken}/${file.file_path}`;
+  const res = await undiciFetch(url, { dispatcher });
+  if (!res.ok) {
+    throw new Error(`Telegram file download failed (${res.status})`);
+  }
+  return {
+    data: Buffer.from(await res.arrayBuffer()),
+    filename: file.file_path.split("/").pop(),
+  };
+}
 
 export function createBot() {
   // Honor HTTPS_PROXY when present (e.g. sandboxed/corporate environments).
@@ -50,7 +78,8 @@ export function createBot() {
   bot.command("start", async (ctx) => {
     await ctx.reply(
       "Under Construction launch system online.\n\n" +
-        "Commands: /status /queue /plan /report /book /app /idea /outreach /kdp /postiz /pause /resume /amend",
+        "Commands: /status /queue /plan /report /book /app /idea /outreach /kdp /postiz /media /pause /resume /amend\n\n" +
+          "Send me a photo or video any time — it goes into the Postiz media library for reuse in posts.",
     );
   });
 
@@ -139,6 +168,96 @@ export function createBot() {
     );
   });
 
+  // --- /media: browse the reusable media library -----------------------------
+  bot.command("media", async (ctx) => {
+    const rows = mediaLibrary.list(15);
+    if (rows.length === 0) {
+      await ctx.reply(
+        "Media library is empty. Send me a photo or video and I'll upload it to Postiz and keep it here for reuse.",
+      );
+      return;
+    }
+    const lines = rows.map(
+      (m) =>
+        `#${m.id} ${m.kind}${m.label ? ` — ${m.label}` : ""}\n   ${m.path}`,
+    );
+    await ctx.reply(
+      `Media library (newest ${rows.length}):\n\n${lines.join("\n")}\n\n` +
+        "Reference these by #id when approving posts.",
+    );
+  });
+
+  // --- Incoming photos/videos: mirror into Postiz + library ------------------
+  // Send a photo or video (optionally with a caption used as its label) and
+  // it becomes reusable media for any future post.
+  async function saveIncomingMedia(ctx, kind, fileObj) {
+    if (!isConfigured()) {
+      await ctx.reply(
+        "Postiz is not configured, so I can't upload media yet. Set POSTIZ_API_URL and POSTIZ_API_KEY.",
+      );
+      return;
+    }
+    try {
+      const { data, filename } = await downloadTelegramFile(
+        ctx.api,
+        fileObj.file_id,
+      );
+      const uploaded = await uploadMedia({
+        data,
+        filename,
+        contentType: fileObj.mime_type,
+      });
+      const label = ctx.message.caption?.trim() || null;
+      const id = mediaLibrary.save({
+        postizId: uploaded.id,
+        path: uploaded.path,
+        kind,
+        label,
+        telegramFileId: fileObj.file_id,
+      });
+      logEvent("media_saved", { id, kind, label, path: uploaded.path });
+      await ctx.reply(
+        `Saved to the media library as #${id} (${kind}${label ? `: "${label}"` : ""}).\n${uploaded.path}\n\nIt's in Postiz and reusable for any post. /media to browse.`,
+      );
+    } catch (err) {
+      logEvent("media_upload_failed", { kind, error: err.message });
+      const hint = /file is too big|download failed \(4/i.test(err.message)
+        ? " (Telegram bots can only fetch files up to 20 MB — for bigger videos, upload directly in the Postiz dashboard.)"
+        : "";
+      await ctx.reply(`Couldn't save that: ${err.message}${hint}`);
+    }
+  }
+
+  bot.on("message:photo", async (ctx) => {
+    // Telegram sends multiple resolutions; the last entry is the original size.
+    const sizes = ctx.message.photo;
+    await saveIncomingMedia(ctx, "photo", sizes[sizes.length - 1]);
+  });
+  bot.on("message:video", (ctx) =>
+    saveIncomingMedia(ctx, "video", ctx.message.video),
+  );
+  bot.on("message:video_note", (ctx) =>
+    saveIncomingMedia(ctx, "video", ctx.message.video_note),
+  );
+  bot.on("message:animation", (ctx) =>
+    saveIncomingMedia(ctx, "animation", ctx.message.animation),
+  );
+  bot.on("message:document", async (ctx) => {
+    const doc = ctx.message.document;
+    const kind = doc.mime_type?.startsWith("video/")
+      ? "video"
+      : doc.mime_type?.startsWith("image/")
+        ? "photo"
+        : null;
+    if (!kind) {
+      await ctx.reply(
+        "I only store images and videos in the media library. Send photos or video files.",
+      );
+      return;
+    }
+    await saveIncomingMedia(ctx, kind, doc);
+  });
+
   // --- Commands arriving in later milestones ---------------------------------
   const pending = {
     queue: "M2",
@@ -182,6 +301,7 @@ export async function registerCommandMenu(bot) {
     { command: "outreach", description: "Podcast pipeline status" },
     { command: "kdp", description: "Log weekly KDP sales figures" },
     { command: "postiz", description: "Check the Postiz publishing connection" },
+    { command: "media", description: "Browse the reusable media library" },
     { command: "pause", description: "Freeze all publishing instantly" },
     { command: "resume", description: "Unfreeze publishing" },
     { command: "amend", description: "Propose a Constitution change" },

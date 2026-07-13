@@ -1,4 +1,4 @@
-import { fetch as undiciFetch, EnvHttpProxyAgent } from "undici";
+import { fetch as undiciFetch, EnvHttpProxyAgent, FormData } from "undici";
 import { config } from "./config.js";
 import { isPaused, logEvent } from "./db.js";
 
@@ -82,6 +82,38 @@ export async function checkConnection() {
   }
 }
 
+// --- Media --------------------------------------------------------------------
+
+// Uploads a file to the Postiz media library. The public API has no endpoint
+// to list media, so callers must persist the returned { id, path } themselves
+// (we keep a library in the SQLite media table) — files uploaded manually in
+// the Postiz dashboard are NOT reachable through the API.
+export async function uploadMedia({ data, filename, contentType }) {
+  if (!isConfigured()) {
+    throw new Error(
+      "Postiz is not configured. Set POSTIZ_API_URL and POSTIZ_API_KEY in .env.",
+    );
+  }
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([data], { type: contentType || "application/octet-stream" }),
+    filename,
+  );
+  const res = await undiciFetch(`${config.postizUrl}/upload`, {
+    method: "POST",
+    dispatcher,
+    headers: { Authorization: config.postizKey },
+    body: form,
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Postiz upload failed (${res.status}): ${text}`);
+  }
+  // { id, name, path, ... } — id + path are what posts reference.
+  return JSON.parse(text);
+}
+
 // --- Publishing ---------------------------------------------------------------
 
 // Postiz validates settings per platform; these are the required minimums
@@ -97,9 +129,22 @@ const DEFAULT_SETTINGS = {
 // This is the single choke point for outbound posts: DRY_RUN and /pause are
 // enforced here so no caller can accidentally publish around them.
 // draft: true creates a dashboard-only draft in Postiz instead of publishing.
-export async function createPost({ content, platform, scheduledFor, draft = false }) {
+// media: rows from the SQLite media library (or raw { id, path } objects).
+export async function createPost({
+  content,
+  platform,
+  scheduledFor,
+  draft = false,
+  media = [],
+}) {
   if (config.dryRun) {
-    logEvent("postiz_dry_run", { platform, scheduledFor, draft, content });
+    logEvent("postiz_dry_run", {
+      platform,
+      scheduledFor,
+      draft,
+      content,
+      media: media.map((m) => m.path),
+    });
     return { dryRun: true };
   }
   if (isPaused()) {
@@ -126,8 +171,17 @@ export async function createPost({ content, platform, scheduledFor, draft = fals
     tags: [],
     posts: integrations.map((integration) => ({
       integration: { id: integration.id },
-      // image is required by the API even for text-only posts.
-      value: [{ content, image: [] }],
+      // image is required by the API even for text-only posts; it carries
+      // photos and videos alike.
+      value: [
+        {
+          content,
+          image: media.map((m) => ({
+            id: m.postiz_id ?? m.id,
+            path: m.path,
+          })),
+        },
+      ],
       settings:
         DEFAULT_SETTINGS[String(integration.identifier).toLowerCase()] ?? {},
     })),
