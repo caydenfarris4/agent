@@ -168,7 +168,7 @@ export function createBot() {
     await ctx.editMessageReplyMarkup(); // remove the buttons
 
     const fresh = drafts.get(id);
-    const result = await publishDraft(fresh);
+    const result = await publishDraft(fresh, { api: ctx.api });
     await ctx.reply(describePublishResult(fresh, result));
   });
 
@@ -198,7 +198,7 @@ export function createBot() {
   bot.command("resume", async (ctx) => {
     setPaused(false);
     logEvent("resumed", {});
-    const flushed = await flushApproved();
+    const flushed = await flushApproved({ api: ctx.api });
     const lines = ["Publishing resumed."];
     for (const { draft, result } of flushed) {
       lines.push(describePublishResult(draft, result));

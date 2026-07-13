@@ -28,9 +28,11 @@ if (!config.anthropicApiKey) {
 
 const bot = createBot();
 
+let schedulers = { stop() {} };
+
 async function main() {
   await registerCommandMenu(bot);
-  startSchedulers(bot);
+  schedulers = startSchedulers(bot);
   logEvent("startup", { dry_run: config.dryRun });
   console.log(
     `Starting Telegram bot (long polling). DRY_RUN=${config.dryRun}, model=${config.agentModel}`,
@@ -41,8 +43,12 @@ async function main() {
   });
 }
 
-process.once("SIGINT", () => bot.stop());
-process.once("SIGTERM", () => bot.stop());
+function shutdown() {
+  schedulers.stop();
+  bot.stop();
+}
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
 
 main().catch((err) => {
   console.error("Fatal:", err);

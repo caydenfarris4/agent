@@ -35,7 +35,8 @@ The three governing documents live in this repo and are loaded at runtime:
 - [x] **M2** — Full pipeline pass: `/draft` → Content draft → Chief of Staff review → Critique audit → approval buttons → dry-run publish, plus `/queue` and Chief of Staff chat
 - [x] **M3** — Remaining specialists and commands: `/book`, `/app`, `/kdp`, `/idea`, `/outreach` (targets + pitches behind approval), `/amend` (Critique restates, you ratify), `/reply` (Engagement Agent), photo/video asset drops (photos go to the Content Agent as images)
 - [x] **M4** — Schedulers (in `TZ`): daily Chief of Staff run 09:00 (assigns and drafts the day's posts, delivered as one approval bundle), weekly plan Mon 08:00, weekly analytics report Sun 18:00; `/plan` and `/report` on demand. `ENABLE_SCHEDULERS=false` turns the cron jobs off.
-- [x] **M5** — Postiz integration, still behind `DRY_RUN`: `/channels` maps linkedin/instagram/x to connected Postiz channels; approving with `DRY_RUN=false` publishes for real. Replies, email, and media posts stay manual and say so honestly. Going live is a config flip, not a code change.
+- [x] **M5** — Postiz integration, still behind `DRY_RUN`: `/channels` maps linkedin/instagram/x to connected Postiz channels; approving with `DRY_RUN=false` publishes for real, including photo/video posts (the asset is fetched from Telegram and uploaded to Postiz). Replies and email stay manual and say so honestly. Going live is a config flip, not a code change.
+- [x] **Post-M5 polish** — `/links` approved-asset store injected into every agent context; outreach follow-ups auto-drafted by the daily run after 10+ quiet days (one per target, sending stays manual); `/outreach mark <id> replied|scheduled|aired|declined`; clean scheduler shutdown; verified end to end against the live Claude API.
 
 ## Local setup
 

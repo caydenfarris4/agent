@@ -57,6 +57,7 @@ export function linksBlock(platform) {
     platform && (all[`amazon_${platform}`] || all.amazon)
       ? `For book content on ${platform}, the Amazon destination is: ${all[`amazon_${platform}`] || all.amazon}`
       : "",
+    "Place any link in the post copy itself. Publishing is automated and posts exactly what you write; it cannot add a first comment, so 'link in the first comment' is not available.",
   ]
     .filter(Boolean)
     .join("\n");

@@ -56,6 +56,66 @@ function request(method, path, body = null) {
   });
 }
 
+const MIME_BY_EXT = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+};
+
+/** Multipart upload to the Postiz public API. Returns the stored file record ({id, path, ...}). */
+export function uploadFile(buffer, filename) {
+  const base = config.postizUrl.replace(/\/+$/, "");
+  const url = new URL(base + "/upload");
+  const isHttps = url.protocol === "https:";
+  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
+
+  const ext = (filename.split(".").pop() || "").toLowerCase();
+  const mime = MIME_BY_EXT[ext] || "application/octet-stream";
+  const boundary = "----launchsys" + Math.random().toString(16).slice(2);
+  const head = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mime}\r\n\r\n`,
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const payload = Buffer.concat([head, buffer, tail]);
+
+  return new Promise((resolve, reject) => {
+    const req = (isHttps ? https : http).request(
+      url,
+      {
+        method: "POST",
+        agent: isHttps && proxy ? new HttpsProxyAgent(proxy) : undefined,
+        headers: {
+          Authorization: config.postizKey,
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": payload.length,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            return reject(new Error(`Postiz upload: HTTP ${res.statusCode} ${text.slice(0, 300)}`));
+          }
+          try {
+            resolve(JSON.parse(text));
+          } catch {
+            reject(new Error(`Postiz upload: unparseable response ${text.slice(0, 120)}`));
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
 export function postizConfigured() {
   return Boolean(config.postizUrl && config.postizKey);
 }
@@ -67,10 +127,11 @@ export async function listIntegrations({ req = request } = {}) {
 }
 
 /**
- * Publish one text post to one channel, now or scheduled.
+ * Publish one post to one channel, now or scheduled, optionally with media
+ * previously stored via uploadFile ([{id}] entries).
  * @returns Postiz response (includes the post id).
  */
-export async function createPost({ integrationId, content, scheduledFor = null }, { req = request } = {}) {
+export async function createPost({ integrationId, content, scheduledFor = null, media = [] }, { req = request } = {}) {
   return req("POST", "/posts", {
     type: scheduledFor ? "schedule" : "now",
     date: scheduledFor || new Date().toISOString(),
@@ -79,7 +140,7 @@ export async function createPost({ integrationId, content, scheduledFor = null }
     posts: [
       {
         integration: { id: integrationId },
-        value: [{ content }],
+        value: [{ content, ...(media.length ? { image: media } : {}) }],
       },
     ],
   });

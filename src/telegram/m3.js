@@ -1,8 +1,7 @@
-import https from "node:https";
 import { InlineKeyboard } from "grammy";
-import { HttpsProxyAgent } from "https-proxy-agent";
 import { config } from "../config.js";
 import { db, outreach, metrics, kdp, settings, links, logEvent } from "../db.js";
+import { downloadTelegramFile } from "./files.js";
 import { callAgent } from "../agents/client.js";
 import { runSpecialistPipeline, parseFields } from "../agents/pipeline.js";
 import { loadConstitution, saveConstitution, formatAmendment } from "../prompts.js";
@@ -27,32 +26,10 @@ export function parseTargeting(args, { platform = "linkedin", vertical = "book" 
   return { platform, vertical, rest: words.join(" ") };
 }
 
-function httpGet(url) {
-  return new Promise((resolve, reject) => {
-    const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
-    const opts = proxy ? { agent: new HttpsProxyAgent(proxy) } : {};
-    https
-      .get(url, opts, (res) => {
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error(`HTTP ${res.statusCode} downloading file`));
-        }
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => resolve(Buffer.concat(chunks)));
-      })
-      .on("error", reject);
-  });
-}
-
 async function downloadTelegramPhoto(api, fileId) {
-  const file = await api.getFile(fileId);
-  const url = `https://api.telegram.org/file/bot${config.telegramToken}/${file.file_path}`;
-  const buf = await httpGet(url);
-  if (buf.length > 4 * 1024 * 1024) {
-    throw new Error("photo too large to pass to the Content Agent");
-  }
-  return buf.toString("base64");
+  // 4MB guard: Claude's per-image request limit, well above Telegram photos.
+  const { buffer } = await downloadTelegramFile(api, fileId, { maxBytes: 4 * 1024 * 1024 });
+  return buffer.toString("base64");
 }
 
 /** Fire a pipeline pass without blocking the update loop; card on completion. */
@@ -73,6 +50,7 @@ const OUTREACH_STATUS_ORDER = [
   "awaiting_approval",
   "approved",
   "pitched",
+  "followed_up",
   "replied",
   "scheduled",
   "aired",
@@ -282,7 +260,18 @@ export function registerM3(bot, { requireApiKey }) {
       }
       outreach.update(id, { status: "pitched" });
       logEvent("outreach_pitched", { id });
-      return ctx.reply(`Target #${id} marked pitched. Follow-up drafting after 10 to 14 days of silence arrives with the schedulers.`);
+      return ctx.reply(`Target #${id} marked pitched. If it stays quiet 10+ days, the daily run drafts the one allowed follow-up.`);
+    }
+
+    const mark = args.match(/^mark\s+(\d+)\s+(replied|scheduled|aired|declined)$/i);
+    if (mark) {
+      const id = Number(mark[1]);
+      const status = mark[2].toLowerCase();
+      const row = outreach.get(id);
+      if (!row) return ctx.reply(`No outreach target #${id}.`);
+      outreach.update(id, { status });
+      logEvent("outreach_marked", { id, status });
+      return ctx.reply(`Target #${id} (${row.target}) marked ${status}.`);
     }
 
     // Status view.
@@ -292,7 +281,8 @@ export function registerM3(bot, { requireApiKey }) {
       return ctx.reply(
         "The outreach pipeline is empty.\n" +
           "Add a target: /outreach add <show name and why it fits>\n" +
-          "Mark an approved pitch sent: /outreach sent <id>",
+          "Mark an approved pitch sent: /outreach sent <id>\n" +
+          "Update a target: /outreach mark <id> replied|scheduled|aired|declined",
       );
     }
     const lines = ["Outreach pipeline:"];

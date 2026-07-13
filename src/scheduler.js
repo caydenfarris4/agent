@@ -105,23 +105,64 @@ export async function runDaily(api, { call = callAgent } = {}) {
   logEvent("daily_run", { assignments: assignments.length });
   if (assignments.length === 0) {
     await api.sendMessage(owner, `Chief of Staff daily run: nothing to draft today.\n${reply.trim()}`);
-    return { assignments: 0 };
-  }
-
-  await api.sendMessage(
-    owner,
-    `Chief of Staff daily run: ${assignments.length} draft${assignments.length === 1 ? "" : "s"} incoming as one bundle.`,
-  );
-  for (const a of assignments) {
-    try {
-      const draft = await runContentPipeline(a, { call });
-      await sendApprovalCard(api, owner, draft);
-    } catch (err) {
-      console.error("Daily pipeline error:", err);
-      await api.sendMessage(owner, `Pipeline failed for ${a.platform}/${a.vertical}: ${err.message}`);
+  } else {
+    await api.sendMessage(
+      owner,
+      `Chief of Staff daily run: ${assignments.length} draft${assignments.length === 1 ? "" : "s"} incoming as one bundle.`,
+    );
+    for (const a of assignments) {
+      try {
+        const draft = await runContentPipeline(a, { call });
+        await sendApprovalCard(api, owner, draft);
+      } catch (err) {
+        console.error("Daily pipeline error:", err);
+        await api.sendMessage(owner, `Pipeline failed for ${a.platform}/${a.vertical}: ${err.message}`);
+      }
     }
   }
+
+  // Follow-ups run every day, whether or not content was assigned.
+  await draftOutreachFollowUps(api, owner, call);
   return { assignments: assignments.length };
+}
+
+/**
+ * Pitched targets quiet for 10+ days get one drafted follow-up, per the
+ * Outreach Agent's charter (respectful interval, one follow-up maximum,
+ * sending stays manual and approved by Cayden).
+ */
+async function draftOutreachFollowUps(api, owner, call) {
+  const due = db
+    .prepare(
+      "SELECT * FROM outreach WHERE status = 'pitched' AND last_action_at <= datetime('now', '-10 days')",
+    )
+    .all();
+  for (const t of due) {
+    try {
+      const followUp = await call("outreach", [
+        {
+          role: "user",
+          content: [
+            `The pitch to "${t.target}" has had no reply for over 10 days. Draft the one respectful follow-up your charter allows: short, no guilt, no pressure, references the original pitch naturally.`,
+            "",
+            "Original pitch:",
+            t.pitch || "(not recorded)",
+            "",
+            "Return only the follow-up email text, subject line first.",
+          ].join("\n"),
+        },
+      ]);
+      // One follow-up maximum: the status change takes it out of this query for good.
+      outreach.update(t.id, { status: "followed_up" });
+      logEvent("outreach_followup_drafted", { id: t.id });
+      await api.sendMessage(
+        owner,
+        `Follow-up drafted for outreach target #${t.id} (${t.target}), quiet 10+ days. Sending stays manual; if they reply, /outreach mark ${t.id} replied.\n\n${followUp.trim()}`,
+      );
+    } catch (err) {
+      console.error("Follow-up drafting error:", err);
+    }
+  }
 }
 
 // --- Weekly plan -----------------------------------------------------------------
@@ -233,7 +274,7 @@ export function registerM4(bot, { requireApiKey }) {
 export function startSchedulers(bot) {
   if (!config.schedulersEnabled) {
     console.log("Schedulers disabled (ENABLE_SCHEDULERS=false).");
-    return;
+    return { stop() {} };
   }
   const tz = { timezone: config.timezone };
   const guard = (name, fn) => async () => {
@@ -245,10 +286,18 @@ export function startSchedulers(bot) {
       logEvent("scheduler_error", { name, message: String(err?.message ?? err) });
     }
   };
-  cron.schedule(DAILY_CRON, guard("daily", runDaily), tz);
-  cron.schedule(WEEKLY_PLAN_CRON, guard("weekly_plan", runWeeklyPlan), tz);
-  cron.schedule(WEEKLY_REPORT_CRON, guard("weekly_report", runWeeklyReport), tz);
+  const tasks = [
+    cron.schedule(DAILY_CRON, guard("daily", runDaily), tz),
+    cron.schedule(WEEKLY_PLAN_CRON, guard("weekly_plan", runWeeklyPlan), tz),
+    cron.schedule(WEEKLY_REPORT_CRON, guard("weekly_report", runWeeklyReport), tz),
+  ];
   console.log(
     `Schedulers armed (${config.timezone}): daily CoS run 09:00, weekly plan Mon 08:00, weekly report Sun 18:00.`,
   );
+  // Cron tasks hold the event loop open; stop them so SIGINT/SIGTERM exits.
+  return {
+    stop() {
+      for (const t of tasks) t.stop();
+    },
+  };
 }

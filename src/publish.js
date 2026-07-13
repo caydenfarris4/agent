@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { drafts, settings, isPaused, logEvent } from "./db.js";
-import { postizConfigured, createPost } from "./postiz.js";
+import { postizConfigured, createPost, uploadFile } from "./postiz.js";
+import { downloadTelegramFile } from "./telegram/files.js";
 
 function markPublished(id) {
   drafts.update(id, {
@@ -17,7 +18,7 @@ function markPublished(id) {
  *
  * @returns {Promise<{published: boolean, dryRun?: boolean, reason?: string, error?: string}>}
  */
-export async function publishDraft(draft, { post = createPost } = {}) {
+export async function publishDraft(draft, { post = createPost, upload = uploadFile, download = downloadTelegramFile, api = null } = {}) {
   if (isPaused()) {
     return { published: false, reason: "paused" };
   }
@@ -38,10 +39,11 @@ export async function publishDraft(draft, { post = createPost } = {}) {
   if (draft.platform === "reply" || draft.platform === "email") {
     return { published: false, reason: "manual_platform" };
   }
-  if (draft.media_file_id) {
-    // Media upload to Postiz is not built; claiming the post went out with
-    // its asset would be false (and Instagram requires the media).
-    return { published: false, reason: "media_unsupported" };
+  if (draft.media_file_id && !api) {
+    // Media publishing needs a Telegram api handle to fetch the asset;
+    // callers without one (none today) hold rather than post without it,
+    // because an Instagram post missing its media would fail or lie.
+    return { published: false, reason: "media_unavailable" };
   }
   if (!postizConfigured()) {
     logEvent("publish_skipped_no_publisher", { draft_id: draft.id });
@@ -54,10 +56,18 @@ export async function publishDraft(draft, { post = createPost } = {}) {
   }
 
   try {
+    let media = [];
+    if (draft.media_file_id) {
+      const { buffer, filename } = await download(api, draft.media_file_id);
+      const stored = await upload(buffer, filename);
+      if (!stored?.id) throw new Error("Postiz upload returned no file id");
+      media = [{ id: stored.id, path: stored.path }];
+    }
     const res = await post({
       integrationId,
       content: draft.content,
       scheduledFor: draft.scheduled_for,
+      media,
     });
     markPublished(draft.id);
     logEvent("publish_live", {
@@ -100,8 +110,8 @@ export function describePublishResult(draft, result) {
       return `Draft #${draft.id} approved. Publishing is paused; it goes out on /resume.`;
     case "manual_platform":
       return `Draft #${draft.id} approved. ${draft.platform} content is sent manually; the copy above is ready.`;
-    case "media_unsupported":
-      return `Draft #${draft.id} approved. Posts with media stay manual until media upload lands; copy and asset are above.`;
+    case "media_unavailable":
+      return `Draft #${draft.id} approved, but the asset couldn't be fetched for publishing. It stays approved; /resume retries.`;
     case "no_publisher":
       return `Draft #${draft.id} approved. Postiz isn't configured yet, so it stays in the approved list.`;
     case "unmapped_platform":
