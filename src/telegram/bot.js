@@ -18,9 +18,20 @@ const dispatcher =
     ? new EnvHttpProxyAgent()
     : undefined;
 
+// Strips secrets out of text that gets replied to chat or persisted in the
+// events table (e.g. errors quoting a URL that embeds the bot token).
+function scrubSecrets(text) {
+  let out = String(text);
+  for (const secret of [config.telegramToken, config.postizKey]) {
+    if (secret) out = out.split(secret).join("[redacted]");
+  }
+  return out;
+}
+
 // Pulls a file off Telegram's servers. Bot API caps getFile at 20 MB.
 async function downloadTelegramFile(api, fileId) {
   const file = await api.getFile(fileId);
+  // This URL embeds the bot token — it must never appear in errors or logs.
   const url = `https://api.telegram.org/file/bot${config.telegramToken}/${file.file_path}`;
   const res = await undiciFetch(url, { dispatcher });
   if (!res.ok) {
@@ -220,11 +231,12 @@ export function createBot() {
         `Saved to the media library as #${id} (${kind}${label ? `: "${label}"` : ""}).\n${uploaded.path}\n\nIt's in Postiz and reusable for any post. /media to browse.`,
       );
     } catch (err) {
-      logEvent("media_upload_failed", { kind, error: err.message });
-      const hint = /file is too big|download failed \(4/i.test(err.message)
+      const message = scrubSecrets(err.message);
+      logEvent("media_upload_failed", { kind, error: message });
+      const hint = /file is too big|download failed \(4/i.test(message)
         ? " (Telegram bots can only fetch files up to 20 MB — for bigger videos, upload directly in the Postiz dashboard.)"
         : "";
-      await ctx.reply(`Couldn't save that: ${err.message}${hint}`);
+      await ctx.reply(`Couldn't save that: ${message}${hint}`);
     }
   }
 
