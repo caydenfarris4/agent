@@ -4,6 +4,7 @@ import { nextPeakSlots, formatSlot } from "../schedule.js";
 export function approvalKeyboard(draftId) {
   return new InlineKeyboard()
     .text("✅ Approve", `approve:${draftId}`)
+    .text("✏️ Edit", `edit:${draftId}`)
     .text("❌ Reject", `reject:${draftId}`);
 }
 

@@ -3,7 +3,7 @@ import { HttpsProxyAgent } from "https-proxy-agent";
 import { config } from "../config.js";
 import { db, drafts, settings, links, getOwnerId, isPaused, setPaused, logEvent, scrubSecrets } from "../db.js";
 import { callAgent } from "../agents/client.js";
-import { runContentPipeline } from "../agents/pipeline.js";
+import { runContentPipeline, reviseDraft } from "../agents/pipeline.js";
 import { publishDraft, publishDue, describePublishResult } from "../publish.js";
 import { isConfigured as postizConfigured, checkConnection, integrationsForPlatform } from "../postiz.js";
 import { sendApprovalCard, scheduleKeyboard } from "./approvals.js";
@@ -218,9 +218,30 @@ export function createBot() {
       return;
     }
     settings.set("awaiting_rejection_for", String(id));
+    settings.set("awaiting_edit_for", "");
     await ctx.answerCallbackQuery({ text: "Rejecting." });
     await ctx.reply(
       `Rejecting draft #${id}. Reply with a one-line reason (it goes back to the specialist), or "skip".`,
+    );
+  });
+
+  // --- ✏️ Edit: replace the copy, or instruct the specialist -------------------
+  bot.callbackQuery(/^edit:(\d+)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const draft = drafts.get(id);
+    if (!draft || draft.status !== "queued") {
+      await ctx.answerCallbackQuery({ text: "Already handled." });
+      return;
+    }
+    settings.set("awaiting_edit_for", String(id));
+    settings.set("awaiting_rejection_for", "");
+    await ctx.answerCallbackQuery({ text: "Editing." });
+    await ctx.reply(
+      `Editing draft #${id}. Reply with either:\n` +
+        `• the full revised copy (it replaces the draft as-is), or\n` +
+        `• an instruction starting with ">" and the specialist revises it, e.g.\n` +
+        `  > tighten the middle and cut the second metaphor\n\n` +
+        `Or "cancel".`,
     );
   });
 
@@ -288,6 +309,43 @@ export function createBot() {
   // --- Free-form text: rejection reasons, then Chief of Staff chat -----------
   bot.on("message:text", async (ctx) => {
     const text = ctx.message.text.trim();
+
+    // A pending edit captures the next message as new copy or an instruction.
+    const editing = settings.get("awaiting_edit_for");
+    if (editing) {
+      settings.set("awaiting_edit_for", "");
+      const id = Number(editing);
+      const draft = drafts.get(id);
+      if (!draft || draft.status !== "queued") {
+        return ctx.reply(`Draft #${id} is no longer in the queue; nothing edited.`);
+      }
+      if (/^cancel$/i.test(text)) {
+        return ctx.reply(`Edit cancelled. Draft #${id} is unchanged in the queue.`);
+      }
+
+      if (text.startsWith(">")) {
+        const instruction = text.slice(1).trim();
+        const offline = requireApiKey();
+        if (offline) return ctx.reply(offline);
+        await ctx.reply(`Sending your instruction to the ${draft.agent} agent...`);
+        try {
+          const revised = await reviseDraft(draft, instruction);
+          drafts.update(id, { content: revised });
+          logEvent("draft_edited", { draft_id: id, mode: "instruction" });
+          await sendApprovalCard(ctx.api, ctx.chat.id, drafts.get(id));
+        } catch (err) {
+          await ctx.reply(`Revision failed: ${scrubSecrets(err.message)}. Draft #${id} is unchanged.`);
+        }
+        return;
+      }
+
+      // Full replacement: Cayden's words are final, no re-audit (Article IX).
+      drafts.update(id, { content: text });
+      logEvent("draft_edited", { draft_id: id, mode: "replace" });
+      await ctx.reply(`Draft #${id} updated with your copy.`);
+      await sendApprovalCard(ctx.api, ctx.chat.id, drafts.get(id));
+      return;
+    }
 
     // A pending rejection captures the next message as the reason.
     const rejecting = settings.get("awaiting_rejection_for");

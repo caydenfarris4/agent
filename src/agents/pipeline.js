@@ -296,6 +296,31 @@ export async function runSpecialistPipeline(job, { call = callAgent, onProgress 
   return drafts.get(id);
 }
 
+/**
+ * Revise a queued draft from Cayden's instruction ("> tighten the middle").
+ * Goes straight back to the drafting specialist; no re-review or re-audit,
+ * because Cayden is the final gate and is looking at the result either way
+ * (Article IX: he approves, rejects, or edits).
+ *
+ * @returns {Promise<string>} the revised copy
+ */
+export async function reviseDraft(draft, instruction, { call = callAgent } = {}) {
+  const specialist = draft.agent || "content";
+  const message = [
+    `Cayden reviewed your draft in the approval queue and wants a revision. His instruction: "${instruction}"`,
+    `Vertical: ${draft.vertical}`,
+    `Platform: ${draft.platform}`,
+    "",
+    "Current draft:",
+    draft.content,
+    linksBlock(draft.platform),
+    "",
+    "Apply his instruction faithfully; change nothing he didn't ask about unless his instruction requires it. Return only the revised copy.",
+  ].join("\n");
+  const text = await call(specialist, [{ role: "user", content: message }]);
+  return text.trim();
+}
+
 /** The M2 entry point: a Content Agent pass from a /draft brief. */
 export async function runContentPipeline(job, deps) {
   return runSpecialistPipeline(
