@@ -22,6 +22,12 @@ export async function publishDraft(draft, { post = createPost, upload = uploadFi
   if (isPaused()) {
     return { published: false, reason: "paused" };
   }
+  // The bot owns scheduling: a future scheduled_for waits for the due-check
+  // cron (publishDue) rather than being handed to Postiz, so dry run and
+  // live behave identically and /status can show what's pending.
+  if (draft.scheduled_for && draft.scheduled_for > new Date().toISOString().replace("T", " ").slice(0, 19)) {
+    return { published: false, reason: "not_due" };
+  }
   if (config.dryRun) {
     markPublished(draft.id);
     logEvent("publish_dry_run", {
@@ -66,7 +72,6 @@ export async function publishDraft(draft, { post = createPost, upload = uploadFi
     const res = await post({
       integrationId,
       content: draft.content,
-      scheduledFor: draft.scheduled_for,
       media,
     });
     markPublished(draft.id);
@@ -84,15 +89,18 @@ export async function publishDraft(draft, { post = createPost, upload = uploadFi
 }
 
 /**
- * Publish every approved-but-unpublished draft. Called on /resume so a
- * pause doesn't strand approvals; also retries drafts whose live publish
- * previously failed.
+ * Publish scheduled drafts whose slot has arrived: the due-check cron, and
+ * /resume after a pause. "Post now" stamps scheduled_for too, so pause-held
+ * and publish-failed drafts retry here, while approved drafts still waiting
+ * for Cayden to pick a time never move.
  *
  * @returns {Promise<Array<{draft: object, result: object}>>}
  */
-export async function flushApproved(deps = {}) {
+export async function publishDue(deps = {}) {
+  const nowStr = new Date().toISOString().replace("T", " ").slice(0, 19);
   const results = [];
   for (const draft of drafts.listByStatus("approved")) {
+    if (!draft.scheduled_for || draft.scheduled_for > nowStr) continue;
     results.push({ draft, result: await publishDraft(draft, deps) });
   }
   return results;
@@ -108,6 +116,8 @@ export function describePublishResult(draft, result) {
   switch (result.reason) {
     case "paused":
       return `Draft #${draft.id} approved. Publishing is paused; it goes out on /resume.`;
+    case "not_due":
+      return `Draft #${draft.id} is scheduled and will post at its slot.`;
     case "manual_platform":
       return `Draft #${draft.id} approved. ${draft.platform} content is sent manually; the copy above is ready.`;
     case "media_unavailable":

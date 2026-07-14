@@ -4,9 +4,10 @@ import { config } from "../config.js";
 import { db, drafts, settings, links, getOwnerId, isPaused, setPaused, logEvent } from "../db.js";
 import { callAgent } from "../agents/client.js";
 import { runContentPipeline } from "../agents/pipeline.js";
-import { publishDraft, flushApproved, describePublishResult } from "../publish.js";
+import { publishDraft, publishDue, describePublishResult } from "../publish.js";
 import { postizConfigured, listIntegrations, mapPlatforms } from "../postiz.js";
-import { sendApprovalCard } from "./approvals.js";
+import { sendApprovalCard, scheduleKeyboard } from "./approvals.js";
+import { formatSlot, toSqliteUtc } from "../schedule.js";
 import { registerM3, parseTargeting } from "./m3.js";
 import { registerM4 } from "../scheduler.js";
 
@@ -94,6 +95,13 @@ export function createBot() {
     if (escalations > 0) waiting.push(`${escalations} escalation(s)`);
     if (outreachWaiting > 0)
       waiting.push(`${outreachWaiting} outreach target(s)`);
+    const unscheduled = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM drafts WHERE status = 'approved' AND scheduled_for IS NULL AND published_at IS NULL",
+      )
+      .get().n;
+    if (unscheduled > 0)
+      waiting.push(`${unscheduled} approved draft(s) awaiting a post time`);
     lines.push(
       waiting.length
         ? `Waiting on you: ${waiting.join(", ")}`
@@ -164,12 +172,42 @@ export function createBot() {
     }
     drafts.update(id, { status: "approved" });
     logEvent("draft_approved", { draft_id: id });
-    await ctx.answerCallbackQuery({ text: "Approved." });
-    await ctx.editMessageReplyMarkup(); // remove the buttons
+    await ctx.answerCallbackQuery({ text: "Approved. When should it post?" });
+    // Swap Approve/Reject for the scheduling choices (peak slots per platform).
+    await ctx.editMessageReplyMarkup({ reply_markup: scheduleKeyboard(draft) });
+  });
 
-    const fresh = drafts.get(id);
-    const result = await publishDraft(fresh, { api: ctx.api });
-    await ctx.reply(describePublishResult(fresh, result));
+  // --- When to post: now, or a peak slot --------------------------------------
+  bot.callbackQuery(/^pub:(\d+):(now|\d+)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const when = ctx.match[2];
+    const draft = drafts.get(id);
+    if (!draft || draft.status !== "approved" || draft.published_at) {
+      await ctx.answerCallbackQuery({ text: "Already handled." });
+      return;
+    }
+
+    if (when === "now") {
+      // Stamp the choice: if publishing is paused or fails, the due-check
+      // and /resume know this draft was released, unlike one still waiting
+      // for a time to be picked.
+      drafts.update(id, { scheduled_for: toSqliteUtc(new Date()) });
+      await ctx.answerCallbackQuery({ text: "Posting now." });
+      await ctx.editMessageReplyMarkup(); // remove the buttons
+      const fresh = drafts.get(id);
+      const result = await publishDraft(fresh, { api: ctx.api });
+      await ctx.reply(describePublishResult(fresh, result));
+      return;
+    }
+
+    const slot = new Date(Number(when) * 1000);
+    drafts.update(id, { scheduled_for: toSqliteUtc(slot) });
+    logEvent("draft_scheduled", { draft_id: id, scheduled_for: toSqliteUtc(slot) });
+    await ctx.answerCallbackQuery({ text: "Scheduled." });
+    await ctx.editMessageReplyMarkup();
+    await ctx.reply(
+      `Draft #${id} scheduled for ${formatSlot(slot)} (${config.timezone}), a peak window for ${draft.platform}. It posts automatically${config.dryRun ? " (dry run: it will log, not post)" : ""}; /pause holds it.`,
+    );
   });
 
   bot.callbackQuery(/^reject:(\d+)$/, async (ctx) => {
@@ -198,7 +236,9 @@ export function createBot() {
   bot.command("resume", async (ctx) => {
     setPaused(false);
     logEvent("resumed", {});
-    const flushed = await flushApproved({ api: ctx.api });
+    // Release only drafts whose post time was chosen and has arrived;
+    // approved drafts still awaiting a time pick stay put.
+    const flushed = await publishDue({ api: ctx.api });
     const lines = ["Publishing resumed."];
     for (const { draft, result } of flushed) {
       lines.push(describePublishResult(draft, result));

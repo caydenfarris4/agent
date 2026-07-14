@@ -1,9 +1,23 @@
 import { InlineKeyboard } from "grammy";
+import { nextPeakSlots, formatSlot } from "../schedule.js";
 
 export function approvalKeyboard(draftId) {
   return new InlineKeyboard()
     .text("✅ Approve", `approve:${draftId}`)
     .text("❌ Reject", `reject:${draftId}`);
+}
+
+/**
+ * After Approve: post now, or one of the next three peak engagement slots
+ * for the draft's platform. Slot times ride in the callback data as epoch
+ * seconds so the choice is exact regardless of when it's tapped.
+ */
+export function scheduleKeyboard(draft) {
+  const kb = new InlineKeyboard().text("⚡ Post now", `pub:${draft.id}:now`).row();
+  for (const slot of nextPeakSlots(draft.platform)) {
+    kb.text(formatSlot(slot), `pub:${draft.id}:${Math.floor(slot.getTime() / 1000)}`);
+  }
+  return kb;
 }
 
 /**

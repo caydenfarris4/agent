@@ -4,12 +4,15 @@ import { db, drafts, outreach, metrics, kdp, settings, links, getOwnerId, isPaus
 import { callAgent } from "./agents/client.js";
 import { runContentPipeline } from "./agents/pipeline.js";
 import { sendApprovalCard } from "./telegram/approvals.js";
+import { publishDue, describePublishResult } from "./publish.js";
 
 const LAUNCH_DATE = "2026-08-11";
 // Daily run after the Monday plan so the plan lands first.
 const DAILY_CRON = "0 9 * * *";
 const WEEKLY_PLAN_CRON = "0 8 * * 1";
 const WEEKLY_REPORT_CRON = "0 18 * * 0";
+// Due-check for scheduled posts; every 5 minutes keeps slots accurate.
+const DUE_CHECK_CRON = "*/5 * * * *";
 const MAX_DAILY_ASSIGNMENTS = 3;
 
 function daysToLaunch() {
@@ -238,6 +241,20 @@ export async function runWeeklyReport(api, { call = callAgent } = {}) {
   return { sent: true };
 }
 
+/** Publish any scheduled drafts whose slot has arrived; tell Cayden per post. */
+export async function runDueCheck(api, deps = {}) {
+  const owner = getOwnerId();
+  if (!owner) return { skipped: true };
+  const results = await publishDue({ api, ...deps });
+  for (const { draft, result } of results) {
+    if (result.published || result.reason === "error") {
+      await api.sendMessage(owner, describePublishResult(draft, result));
+    }
+    // 'paused' stays silent: /pause already told him, and /resume reports.
+  }
+  return { published: results.filter((r) => r.result.published).length };
+}
+
 // --- Wiring ------------------------------------------------------------------------
 
 export function registerM4(bot, { requireApiKey }) {
@@ -290,9 +307,10 @@ export function startSchedulers(bot) {
     cron.schedule(DAILY_CRON, guard("daily", runDaily), tz),
     cron.schedule(WEEKLY_PLAN_CRON, guard("weekly_plan", runWeeklyPlan), tz),
     cron.schedule(WEEKLY_REPORT_CRON, guard("weekly_report", runWeeklyReport), tz),
+    cron.schedule(DUE_CHECK_CRON, guard("due_check", runDueCheck), tz),
   ];
   console.log(
-    `Schedulers armed (${config.timezone}): daily CoS run 09:00, weekly plan Mon 08:00, weekly report Sun 18:00.`,
+    `Schedulers armed (${config.timezone}): daily CoS run 09:00, weekly plan Mon 08:00, weekly report Sun 18:00, due-check every 5 min.`,
   );
   // Cron tasks hold the event loop open; stop them so SIGINT/SIGTERM exits.
   return {
