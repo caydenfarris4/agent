@@ -13,6 +13,8 @@ const WEEKLY_PLAN_CRON = "0 8 * * 1";
 const WEEKLY_REPORT_CRON = "0 18 * * 0";
 // Due-check for scheduled posts; every 5 minutes keeps slots accurate.
 const DUE_CHECK_CRON = "*/5 * * * *";
+// Trends research before the Monday plan, so the plan can draw on it.
+const TRENDS_CRON = "30 7 * * 1";
 const MAX_DAILY_ASSIGNMENTS = 3;
 
 function daysToLaunch() {
@@ -67,6 +69,10 @@ function systemContext() {
       ? `Approved links: ${linkEntries.map(([k, v]) => `${k}=${v}`).join(", ")}`
       : "Approved links: none set yet (drafts carry the [AMAZON LINK] placeholder).",
   );
+  const trends = settings.get("trends_report");
+  if (trends) {
+    lines.push("", "Latest trends and virality research (from the Trends Agent):", trends);
+  }
   const plan = settings.get("weekly_plan");
   if (plan) lines.push("", "Current weekly plan:", plan);
   return lines.join("\n");
@@ -179,6 +185,7 @@ export async function runWeeklyPlan(api, { call = callAgent } = {}) {
       role: "user",
       content: [
         "Weekly planning session. Deliver the plan for the coming week per Article XI: the week's content themes per platform, the outreach slate (targets awaiting approval and next moves), and exactly one data-driven change based on last week, with the specific reason named.",
+        "Where the Trends Agent's research below offers a real opening, fold it into the themes and say so; ignore any of it that doesn't serve the launch.",
         "",
         systemContext(),
         "",
@@ -241,6 +248,35 @@ export async function runWeeklyReport(api, { call = callAgent } = {}) {
   return { sent: true };
 }
 
+// --- Weekly trends and virality research -----------------------------------------
+
+export async function runTrendsResearch(api, { call = callAgent } = {}) {
+  const owner = getOwnerId();
+  if (!owner || !config.anthropicApiKey) return { skipped: true };
+
+  const report = await call(
+    "trends",
+    [
+      {
+        role: "user",
+        content: [
+          `Weekly research sweep, ${new Date().toDateString()}. Days to launch: ${daysToLaunch()}.`,
+          "Use web search to research what is trending RIGHT NOW: (1) in the leadership / faith-and-work / young-professional / author space, (2) across social media broadly, and (3) which formats and hooks are currently earning reach on LinkedIn, Instagram, and X.",
+          "Then deliver your weekly report in your charter's exact format (LEADERSHIP SPACE / BROADER ATTENTION / ANGLES / AVOID).",
+          "Keep it under 40 lines. Every ANGLES entry must name the platform, the Story Bank material it draws on, and why it should work now.",
+        ].join("\n"),
+      },
+    ],
+    { webSearch: true, maxTokens: 8192 },
+  );
+
+  settings.set("trends_report", report.trim());
+  settings.set("trends_report_date", new Date().toISOString());
+  logEvent("trends_research", {});
+  await api.sendMessage(owner, `Trends Agent weekly research:\n\n${report.trim()}`);
+  return { sent: true };
+}
+
 /** Publish any scheduled drafts whose slot has arrived; tell Cayden per post. */
 export async function runDueCheck(api, deps = {}) {
   const owner = getOwnerId();
@@ -286,6 +322,24 @@ export function registerM4(bot, { requireApiKey }) {
       await ctx.reply(`Report failed: ${scrubSecrets(err.message)}`);
     }
   });
+
+  bot.command("trends", async (ctx) => {
+    const offline = requireApiKey();
+    if (offline) return ctx.reply(offline);
+    const arg = (ctx.match || "").trim().toLowerCase();
+    const stored = settings.get("trends_report");
+    const storedAt = settings.get("trends_report_date");
+    const fresh = storedAt && Date.now() - new Date(storedAt).getTime() < 7 * 86400000;
+    if (stored && fresh && arg !== "new") {
+      return ctx.reply(`${stored}\n\n(From this week's sweep. /trends new re-researches.)`);
+    }
+    await ctx.reply("Trends Agent is researching (web search, takes a minute or two)...");
+    try {
+      await runTrendsResearch(ctx.api);
+    } catch (err) {
+      await ctx.reply(`Trends research failed: ${scrubSecrets(err.message)}`);
+    }
+  });
 }
 
 export function startSchedulers(bot) {
@@ -308,9 +362,10 @@ export function startSchedulers(bot) {
     cron.schedule(WEEKLY_PLAN_CRON, guard("weekly_plan", runWeeklyPlan), tz),
     cron.schedule(WEEKLY_REPORT_CRON, guard("weekly_report", runWeeklyReport), tz),
     cron.schedule(DUE_CHECK_CRON, guard("due_check", runDueCheck), tz),
+    cron.schedule(TRENDS_CRON, guard("trends", runTrendsResearch), tz),
   ];
   console.log(
-    `Schedulers armed (${config.timezone}): daily CoS run 09:00, weekly plan Mon 08:00, weekly report Sun 18:00, due-check every 5 min.`,
+    `Schedulers armed (${config.timezone}): trends Mon 07:30, weekly plan Mon 08:00, daily CoS run 09:00, weekly report Sun 18:00, due-check every 5 min.`,
   );
   // Cron tasks hold the event loop open; stop them so SIGINT/SIGTERM exits.
   return {

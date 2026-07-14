@@ -281,7 +281,8 @@ export function logEvent(type, payload = {}) {
 export function scrubSecrets(text) {
   let out = String(text);
   for (const secret of [config.telegramToken, config.postizKey, config.anthropicApiKey]) {
-    if (secret) out = out.split(secret).join("[redacted]");
+    // Length guard: a degenerate short value must not shred unrelated text.
+    if (secret && secret.length >= 8) out = out.split(secret).join("[redacted]");
   }
   return out;
 }

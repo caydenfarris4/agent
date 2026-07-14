@@ -1,7 +1,7 @@
 # Under Construction — Launch System
 
 A standalone Node.js multi-agent system that runs the marketing launch for
-*Under Construction* (the book) and Foreman (the app). Seven Claude-powered
+*Under Construction* (the book) and Foreman (the app). Eight Claude-powered
 agents operate under a written constitution, a Telegram bot is the only
 interface, and nothing publishes without explicit approval from your phone.
 
@@ -38,6 +38,7 @@ The three governing documents live in this repo and are loaded at runtime:
 - [x] **M5** — Postiz integration, still behind `DRY_RUN`: `/channels` maps linkedin/instagram/x to connected Postiz channels; approving with `DRY_RUN=false` publishes for real, including photo/video posts (the asset is fetched from Telegram and uploaded to Postiz). Replies and email stay manual and say so honestly. Going live is a config flip, not a code change.
 - [x] **Post-M5 polish** — `/links` approved-asset store injected into every agent context; outreach follow-ups auto-drafted by the daily run after 10+ quiet days (one per target, sending stays manual); `/outreach mark <id> replied|scheduled|aired|declined`; clean scheduler shutdown; verified end to end against the live Claude API.
 - [x] **Peak-time scheduling** — Approve asks when to post: ⚡ now, or one of the next three peak engagement slots for that platform (sourced from Sprout Social / Buffer 2026 engagement studies, computed in `TZ`). Scheduled posts fire from a 5-minute due-check; `/pause` holds them and approved-but-unscheduled drafts never auto-post.
+- [x] **Trends Agent** (8th agent) — weekly virality and trends research every Monday 07:30 via Anthropic's server-side web search: what's trending in the leadership/faith-and-work space, what's earning reach overall, concrete angles mapped to the Story Bank, and what to avoid. Feeds the Monday plan and every agent's context; `/trends` on demand (`/trends new` re-researches).
 
 ## Local setup
 

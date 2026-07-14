@@ -13,15 +13,21 @@ const client = new Anthropic({ apiKey: config.anthropicApiKey });
  *
  * @param {string} agentKey one of the keys in prompts.js (chief_of_staff, critique, ...)
  * @param {Array<{role: string, content: string}>} messages conversation for this turn
+ * @param {{maxTokens?: number, webSearch?: boolean}} opts webSearch grants the
+ *   Anthropic server-side web_search tool (searches run on Anthropic's side,
+ *   so no local network access is needed). Used by the Trends Agent.
  * @returns {Promise<string>} the agent's text response
  */
-export async function callAgent(agentKey, messages, { maxTokens = 4096 } = {}) {
+export async function callAgent(agentKey, messages, { maxTokens = 4096, webSearch = false } = {}) {
   const system = buildSystemPrompt(agentKey);
 
   const response = await client.messages.create({
     model: config.agentModel,
     max_tokens: maxTokens,
     thinking: { type: "adaptive" },
+    ...(webSearch
+      ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }] }
+      : {}),
     system: [
       {
         type: "text",
@@ -38,6 +44,7 @@ export async function callAgent(agentKey, messages, { maxTokens = 4096 } = {}) {
     input_tokens: response.usage.input_tokens,
     output_tokens: response.usage.output_tokens,
     cache_read: response.usage.cache_read_input_tokens,
+    web_searches: response.usage.server_tool_use?.web_search_requests ?? 0,
   });
 
   const text = response.content

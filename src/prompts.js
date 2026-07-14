@@ -17,6 +17,7 @@ const SECTION_HEADINGS = {
   book_growth: "## 5. BOOK GROWTH AGENT",
   app_growth: "## 6. APP GROWTH AGENT",
   engagement: "## 7. ENGAGEMENT AGENT",
+  trends: "## 8. TRENDS AGENT",
 };
 
 export const AGENT_KEYS = Object.keys(SECTION_HEADINGS);

@@ -359,6 +359,7 @@ export async function registerCommandMenu(bot) {
     { command: "reply", description: "Draft a reply to a comment you paste" },
     { command: "plan", description: "Trigger or review the weekly plan" },
     { command: "report", description: "Two-vertical weekly analytics report" },
+    { command: "trends", description: "What's trending and going viral this week" },
     { command: "book", description: "Book vertical metrics snapshot" },
     { command: "app", description: "Foreman vertical metrics snapshot" },
     { command: "idea", description: "Throw a thought into the loop" },
