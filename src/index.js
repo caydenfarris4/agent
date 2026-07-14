@@ -3,6 +3,7 @@ import { logEvent } from "./db.js";
 import { AGENT_KEYS, buildSystemPrompt } from "./prompts.js";
 import { createBot, registerCommandMenu } from "./telegram/bot.js";
 import { startSchedulers } from "./scheduler.js";
+import { checkConnection, isConfigured } from "./postiz.js";
 
 const problems = assertStartupConfig();
 if (problems.length > 0) {
@@ -34,6 +35,21 @@ async function main() {
   await registerCommandMenu(bot);
   schedulers = startSchedulers(bot);
   logEvent("startup", { dry_run: config.dryRun });
+
+  // Non-fatal Postiz check: publishing must never block the bot from starting.
+  if (isConfigured()) {
+    const postiz = await checkConnection();
+    if (postiz.ok) {
+      const names = postiz.integrations.map((i) => i.identifier).join(", ");
+      console.log(
+        `Postiz connected (${config.postizUrl}): ${postiz.integrations.length} channel(s)${names ? ` [${names}]` : ""}`,
+      );
+    } else {
+      console.error(`Postiz connection failed: ${postiz.error}`);
+    }
+  } else {
+    console.log("Postiz not configured; publish steps will dry-run/log only.");
+  }
   console.log(
     `Starting Telegram bot (long polling). DRY_RUN=${config.dryRun}, model=${config.agentModel}`,
   );

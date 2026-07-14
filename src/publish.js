@@ -1,7 +1,17 @@
 import { config } from "./config.js";
-import { drafts, settings, isPaused, logEvent } from "./db.js";
-import { postizConfigured, createPost, uploadFile } from "./postiz.js";
+import { drafts, mediaLibrary, isPaused, logEvent, scrubSecrets } from "./db.js";
+import { isConfigured as postizConfigured, createPost, uploadMedia } from "./postiz.js";
 import { downloadTelegramFile } from "./telegram/files.js";
+
+const MIME_BY_EXT = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+};
 
 function markPublished(id) {
   drafts.update(id, {
@@ -14,11 +24,11 @@ function markPublished(id) {
  * Publish an approved draft. Triple-gated: the caller got here only through
  * the approval pipeline, /pause holds everything, and DRY_RUN (the default)
  * logs instead of posting. With DRY_RUN=false the draft goes out through
- * Postiz to the channel mapped for its platform (/channels builds the map).
+ * Postiz to every connected channel matching the draft's platform.
  *
  * @returns {Promise<{published: boolean, dryRun?: boolean, reason?: string, error?: string}>}
  */
-export async function publishDraft(draft, { post = createPost, upload = uploadFile, download = downloadTelegramFile, api = null } = {}) {
+export async function publishDraft(draft, { post = createPost, upload = uploadMedia, download = downloadTelegramFile, api = null } = {}) {
   if (isPaused()) {
     return { published: false, reason: "paused" };
   }
@@ -55,23 +65,31 @@ export async function publishDraft(draft, { post = createPost, upload = uploadFi
     logEvent("publish_skipped_no_publisher", { draft_id: draft.id });
     return { published: false, reason: "no_publisher" };
   }
-  const map = JSON.parse(settings.get("postiz_map", "{}"));
-  const integrationId = map[draft.platform];
-  if (!integrationId) {
-    return { published: false, reason: "unmapped_platform" };
-  }
 
   try {
     let media = [];
     if (draft.media_file_id) {
       const { buffer, filename } = await download(api, draft.media_file_id);
-      const stored = await upload(buffer, filename);
+      const ext = (filename.split(".").pop() || "").toLowerCase();
+      const stored = await upload({
+        data: buffer,
+        filename,
+        contentType: MIME_BY_EXT[ext] || "application/octet-stream",
+      });
       if (!stored?.id) throw new Error("Postiz upload returned no file id");
       media = [{ id: stored.id, path: stored.path }];
+      // Mirror into the media library so the asset is findable and reusable.
+      mediaLibrary.save({
+        postizId: stored.id,
+        path: stored.path,
+        kind: MIME_BY_EXT[ext]?.startsWith("video") ? "video" : "photo",
+        label: `draft #${draft.id}`,
+        telegramFileId: draft.media_file_id,
+      });
     }
     const res = await post({
-      integrationId,
       content: draft.content,
+      platform: draft.platform,
       media,
     });
     markPublished(draft.id);
@@ -84,7 +102,7 @@ export async function publishDraft(draft, { post = createPost, upload = uploadFi
   } catch (err) {
     // Draft stays 'approved' so /resume (or a fixed config) retries it.
     logEvent("publish_error", { draft_id: draft.id, message: String(err?.message ?? err) });
-    return { published: false, reason: "error", error: err.message };
+    return { published: false, reason: "error", error: scrubSecrets(err.message) };
   }
 }
 
@@ -124,8 +142,6 @@ export function describePublishResult(draft, result) {
       return `Draft #${draft.id} approved, but the asset couldn't be fetched for publishing. It stays approved; /resume retries.`;
     case "no_publisher":
       return `Draft #${draft.id} approved. Postiz isn't configured yet, so it stays in the approved list.`;
-    case "unmapped_platform":
-      return `Draft #${draft.id} approved, but no Postiz channel is mapped for ${draft.platform}. Run /channels, then /resume to retry.`;
     default:
       return `Draft #${draft.id} approved, but publishing failed: ${result.error}. It stays approved; /resume retries.`;
   }

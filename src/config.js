@@ -14,7 +14,12 @@ export const config = {
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
   agentModel: process.env.AGENT_MODEL || "claude-sonnet-4-6",
 
-  postizUrl: process.env.POSTIZ_API_URL || "",
+  // Default to Postiz cloud when only a key is provided; self-hosted
+  // instances set POSTIZ_API_URL explicitly (…/api/public/v1).
+  postizUrl: (
+    process.env.POSTIZ_API_URL ||
+    (process.env.POSTIZ_API_KEY ? "https://api.postiz.com/public/v1" : "")
+  ).replace(/\/+$/, ""),
   postizKey: process.env.POSTIZ_API_KEY || "",
 
   // Safety default: dry run unless explicitly disabled.

@@ -1,11 +1,11 @@
 import { Bot } from "grammy";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { config } from "../config.js";
-import { db, drafts, settings, links, getOwnerId, isPaused, setPaused, logEvent } from "../db.js";
+import { db, drafts, settings, links, getOwnerId, isPaused, setPaused, logEvent, scrubSecrets } from "../db.js";
 import { callAgent } from "../agents/client.js";
 import { runContentPipeline } from "../agents/pipeline.js";
 import { publishDraft, publishDue, describePublishResult } from "../publish.js";
-import { postizConfigured, listIntegrations, mapPlatforms } from "../postiz.js";
+import { isConfigured as postizConfigured, checkConnection, integrationsForPlatform } from "../postiz.js";
 import { sendApprovalCard, scheduleKeyboard } from "./approvals.js";
 import { formatSlot, toSqliteUtc } from "../schedule.js";
 import { registerM3, parseTargeting } from "./m3.js";
@@ -144,7 +144,7 @@ export function createBot() {
       .catch(async (err) => {
         console.error("Pipeline error:", err);
         logEvent("pipeline_error", { message: String(err?.message ?? err) });
-        await bot.api.sendMessage(chatId, `Pipeline failed: ${err.message}`);
+        await bot.api.sendMessage(chatId, `Pipeline failed: ${scrubSecrets(err.message)}`);
       });
   });
 
@@ -246,39 +246,37 @@ export function createBot() {
     await ctx.reply(lines.join("\n"));
   });
 
-  // --- /channels: connect platform names to Postiz channels (M5) -------------
+  // --- /channels: Postiz connection + per-platform coverage ------------------
   bot.command("channels", async (ctx) => {
     if (!postizConfigured()) {
       return ctx.reply(
         "Postiz isn't configured. Set POSTIZ_API_URL and POSTIZ_API_KEY once the dry-run week is complete.",
       );
     }
-    try {
-      const integrations = await listIntegrations();
-      if (integrations.length === 0) {
-        return ctx.reply("Postiz responded but has no connected channels yet.");
-      }
-      const map = mapPlatforms(integrations);
-      settings.set("postiz_map", JSON.stringify(map));
-      logEvent("postiz_mapped", map);
-      const lines = ["Postiz channels:"];
-      for (const i of integrations) {
-        lines.push(`  ${i.identifier}: ${i.name}${i.disabled ? " (disabled)" : ""}`);
-      }
-      lines.push("");
-      const mapped = Object.entries(map);
-      lines.push(
-        mapped.length
-          ? `Mapped for publishing: ${mapped.map(([p, id]) => `${p} -> ${id}`).join(", ")}`
-          : "No linkedin/instagram/x channels found to map.",
-      );
-      for (const p of ["linkedin", "instagram", "x"]) {
-        if (!map[p]) lines.push(`Missing: ${p} (connect it in Postiz, then rerun /channels)`);
-      }
-      await ctx.reply(lines.join("\n"));
-    } catch (err) {
-      await ctx.reply(`Postiz call failed: ${err.message}`);
+    const check = await checkConnection();
+    if (!check.ok) {
+      return ctx.reply(`Postiz connection failed: ${scrubSecrets(check.error)}`);
     }
+    if (check.integrations.length === 0) {
+      return ctx.reply(
+        "Postiz responded but has no connected channels yet. Connect LinkedIn/Instagram/X in the Postiz dashboard, then rerun /channels.",
+      );
+    }
+    const lines = ["Postiz connected. Channels:"];
+    for (const i of check.integrations) {
+      lines.push(`  ${i.identifier}: ${i.name}${i.disabled ? " (disabled)" : ""}`);
+    }
+    lines.push("");
+    for (const p of ["linkedin", "instagram", "x"]) {
+      const matches = integrationsForPlatform(check.integrations, p);
+      lines.push(
+        matches.length
+          ? `${p}: publishes to ${matches.map((m) => m.name).join(", ")}`
+          : `${p}: MISSING (connect it in Postiz, then rerun /channels)`,
+      );
+    }
+    logEvent("postiz_channels_checked", { count: check.integrations.length });
+    await ctx.reply(lines.join("\n"));
   });
 
   // --- M3: specialists, commands, asset drops --------------------------------
@@ -319,8 +317,12 @@ export function createBot() {
       .join(", ");
     const context =
       `[System context: publishing is ${isPaused() ? "paused" : "active"}` +
-      `${config.dryRun ? ", dry run" : ""}; ${queued} draft(s) in the approval queue. ` +
+      `${config.dryRun ? ", DRY RUN (publishes are logged, not posted, until Cayden flips DRY_RUN off)" : ""}; ` +
+      `${queued} draft(s) in the approval queue. ` +
       `Approved links: ${linkList || "none set yet"}. ` +
+      "How publishing works in this system: when Cayden taps Approve on a draft card in Telegram, he picks a posting time (now, or a peak slot) and the system itself publishes through Postiz to the connected channel automatically. " +
+      `Postiz is ${postizConfigured() ? "configured" : "NOT configured yet"}. ` +
+      "Neither you nor any specialist posts anything manually, and Cayden never needs to copy content anywhere; do not tell him otherwise. " +
       "Cayden says:]\n\n";
 
     chiefHistory.push({ role: "user", content: context + text });
@@ -332,7 +334,7 @@ export function createBot() {
     } catch (err) {
       chiefHistory.pop();
       console.error("Chief of Staff error:", err);
-      await ctx.reply(`Chief of Staff call failed: ${err.message}`);
+      await ctx.reply(`Chief of Staff call failed: ${scrubSecrets(err.message)}`);
     }
   });
 

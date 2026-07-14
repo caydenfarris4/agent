@@ -1,6 +1,6 @@
 import cron from "node-cron";
 import { config } from "./config.js";
-import { db, drafts, outreach, metrics, kdp, settings, links, getOwnerId, isPaused, logEvent } from "./db.js";
+import { db, drafts, outreach, metrics, kdp, settings, links, getOwnerId, isPaused, logEvent, scrubSecrets } from "./db.js";
 import { callAgent } from "./agents/client.js";
 import { runContentPipeline } from "./agents/pipeline.js";
 import { sendApprovalCard } from "./telegram/approvals.js";
@@ -119,7 +119,7 @@ export async function runDaily(api, { call = callAgent } = {}) {
         await sendApprovalCard(api, owner, draft);
       } catch (err) {
         console.error("Daily pipeline error:", err);
-        await api.sendMessage(owner, `Pipeline failed for ${a.platform}/${a.vertical}: ${err.message}`);
+        await api.sendMessage(owner, `Pipeline failed for ${a.platform}/${a.vertical}: ${scrubSecrets(err.message)}`);
       }
     }
   }
@@ -272,7 +272,7 @@ export function registerM4(bot, { requireApiKey }) {
     try {
       await runWeeklyPlan(ctx.api);
     } catch (err) {
-      await ctx.reply(`Planning session failed: ${err.message}`);
+      await ctx.reply(`Planning session failed: ${scrubSecrets(err.message)}`);
     }
   });
 
@@ -283,7 +283,7 @@ export function registerM4(bot, { requireApiKey }) {
     try {
       await runWeeklyReport(ctx.api);
     } catch (err) {
-      await ctx.reply(`Report failed: ${err.message}`);
+      await ctx.reply(`Report failed: ${scrubSecrets(err.message)}`);
     }
   });
 }

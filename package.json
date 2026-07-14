@@ -17,6 +17,7 @@
     "dotenv": "^16.4.5",
     "grammy": "^1.44.0",
     "https-proxy-agent": "^9.1.0",
-    "node-cron": "^4.6.0"
+    "node-cron": "^4.6.0",
+    "undici": "^7.28.0"
   }
 }

@@ -1,163 +1,200 @@
-import https from "node:https";
-import http from "node:http";
-import { HttpsProxyAgent } from "https-proxy-agent";
+import { fetch as undiciFetch, EnvHttpProxyAgent, FormData } from "undici";
 import { config } from "./config.js";
+import { isPaused, logEvent } from "./db.js";
 
-/**
- * Minimal Postiz public-API client (self-hosted or cloud).
- * POSTIZ_API_URL is the public API base, e.g. https://postiz.example.com/api/public/v1
- * (cloud: https://api.postiz.com/public/v1). Auth is the API key in the
- * Authorization header, per Postiz docs.
- *
- * NOTE: this path stays cold until DRY_RUN=false. Per the build guide, the
- * first live publish should target a private test channel.
- */
+// Node's global fetch ignores HTTPS_PROXY, so route through undici's
+// env-aware agent when a proxy is configured (same reason bot.js passes
+// an agent to grammY). On a normal VPS this is a no-op.
+const dispatcher =
+  process.env.HTTPS_PROXY || process.env.https_proxy
+    ? new EnvHttpProxyAgent()
+    : undefined;
 
-function request(method, path, body = null) {
-  const base = config.postizUrl.replace(/\/+$/, "");
-  const url = new URL(base + path);
-  const isHttps = url.protocol === "https:";
-  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
-  const payload = body ? JSON.stringify(body) : null;
-
-  return new Promise((resolve, reject) => {
-    const req = (isHttps ? https : http).request(
-      url,
-      {
-        method,
-        agent: isHttps && proxy ? new HttpsProxyAgent(proxy) : undefined,
-        headers: {
-          Authorization: config.postizKey,
-          "Content-Type": "application/json",
-          ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
-        },
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            return reject(
-              new Error(`Postiz ${method} ${path}: HTTP ${res.statusCode} ${text.slice(0, 300)}`),
-            );
-          }
-          try {
-            resolve(text ? JSON.parse(text) : null);
-          } catch {
-            resolve(text);
-          }
-        });
-      },
-    );
-    req.on("error", reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
-
-const MIME_BY_EXT = {
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  png: "image/png",
-  webp: "image/webp",
-  gif: "image/gif",
-  mp4: "video/mp4",
-  mov: "video/quicktime",
-};
-
-/** Multipart upload to the Postiz public API. Returns the stored file record ({id, path, ...}). */
-export function uploadFile(buffer, filename) {
-  const base = config.postizUrl.replace(/\/+$/, "");
-  const url = new URL(base + "/upload");
-  const isHttps = url.protocol === "https:";
-  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
-
-  const ext = (filename.split(".").pop() || "").toLowerCase();
-  const mime = MIME_BY_EXT[ext] || "application/octet-stream";
-  const boundary = "----launchsys" + Math.random().toString(16).slice(2);
-  const head = Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mime}\r\n\r\n`,
-  );
-  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
-  const payload = Buffer.concat([head, buffer, tail]);
-
-  return new Promise((resolve, reject) => {
-    const req = (isHttps ? https : http).request(
-      url,
-      {
-        method: "POST",
-        agent: isHttps && proxy ? new HttpsProxyAgent(proxy) : undefined,
-        headers: {
-          Authorization: config.postizKey,
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-          "Content-Length": payload.length,
-        },
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            return reject(new Error(`Postiz upload: HTTP ${res.statusCode} ${text.slice(0, 300)}`));
-          }
-          try {
-            resolve(JSON.parse(text));
-          } catch {
-            reject(new Error(`Postiz upload: unparseable response ${text.slice(0, 120)}`));
-          }
-        });
-      },
-    );
-    req.on("error", reject);
-    req.write(payload);
-    req.end();
-  });
-}
-
-export function postizConfigured() {
+export function isConfigured() {
   return Boolean(config.postizUrl && config.postizKey);
 }
 
-/** Connected channels: [{id, name, identifier ("linkedin"|"x"|"instagram"|...), disabled}] */
-export async function listIntegrations({ req = request } = {}) {
-  const out = await req("GET", "/integrations");
-  return Array.isArray(out) ? out : out?.integrations || [];
+async function request(method, path, body) {
+  if (!isConfigured()) {
+    throw new Error(
+      "Postiz is not configured. Set POSTIZ_API_URL and POSTIZ_API_KEY in .env.",
+    );
+  }
+  const res = await undiciFetch(`${config.postizUrl}${path}`, {
+    method,
+    dispatcher,
+    headers: {
+      Authorization: config.postizKey,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    const detail =
+      (data && typeof data === "object" && (data.msg || data.message)) ||
+      text ||
+      res.statusText;
+    throw new Error(`Postiz ${method} ${path} failed (${res.status}): ${detail}`);
+  }
+  return data;
 }
 
-/**
- * Publish one post to one channel, now or scheduled, optionally with media
- * previously stored via uploadFile ([{id}] entries).
- * @returns Postiz response (includes the post id).
- */
-export async function createPost({ integrationId, content, scheduledFor = null, media = [] }, { req = request } = {}) {
-  return req("POST", "/posts", {
-    type: scheduledFor ? "schedule" : "now",
-    date: scheduledFor || new Date().toISOString(),
+// --- Channels ---------------------------------------------------------------
+
+// Connected social channels: [{ id, name, identifier, disabled, ... }]
+// where identifier is the platform, e.g. "linkedin", "x", "instagram".
+export async function listIntegrations() {
+  return request("GET", "/integrations");
+}
+
+// Draft platforms use our own names; Postiz identifiers vary slightly
+// (e.g. "instagram" vs "instagram-standalone", legacy "twitter" for x).
+const PLATFORM_ALIASES = {
+  linkedin: ["linkedin", "linkedin-page"],
+  instagram: ["instagram", "instagram-standalone"],
+  x: ["x", "twitter"],
+};
+
+export function integrationsForPlatform(integrations, platform) {
+  const wanted = PLATFORM_ALIASES[platform] ?? [platform];
+  return integrations.filter(
+    (i) => !i.disabled && wanted.includes(String(i.identifier).toLowerCase()),
+  );
+}
+
+// Verifies the domain is reachable and the API key is accepted.
+export async function checkConnection() {
+  if (!isConfigured()) {
+    return { ok: false, error: "POSTIZ_API_URL / POSTIZ_API_KEY not set" };
+  }
+  try {
+    const integrations = await listIntegrations();
+    return { ok: true, integrations };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// --- Media --------------------------------------------------------------------
+
+// Uploads a file to the Postiz media library. The public API has no endpoint
+// to list media, so callers must persist the returned { id, path } themselves
+// (we keep a library in the SQLite media table) — files uploaded manually in
+// the Postiz dashboard are NOT reachable through the API.
+export async function uploadMedia({ data, filename, contentType }) {
+  if (!isConfigured()) {
+    throw new Error(
+      "Postiz is not configured. Set POSTIZ_API_URL and POSTIZ_API_KEY in .env.",
+    );
+  }
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([data], { type: contentType || "application/octet-stream" }),
+    filename,
+  );
+  const res = await undiciFetch(`${config.postizUrl}/upload`, {
+    method: "POST",
+    dispatcher,
+    headers: { Authorization: config.postizKey },
+    body: form,
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Postiz upload failed (${res.status}): ${text}`);
+  }
+  // { id, name, path, ... } — id + path are what posts reference.
+  return JSON.parse(text);
+}
+
+// --- Publishing ---------------------------------------------------------------
+
+// Postiz validates settings per platform; these are the required minimums
+// (confirmed against the live API — missing fields are a 400).
+const DEFAULT_SETTINGS = {
+  x: { who_can_reply_post: "everyone" },
+  twitter: { who_can_reply_post: "everyone" },
+  "instagram-standalone": { post_type: "post" },
+  instagram: { post_type: "post" },
+};
+
+// Sends one piece of content to one or more connected channels.
+// This is the single choke point for outbound posts: DRY_RUN and /pause are
+// enforced here so no caller can accidentally publish around them.
+// draft: true creates a dashboard-only draft in Postiz instead of publishing.
+// media: rows from the SQLite media library (or raw { id, path } objects).
+export async function createPost({
+  content,
+  platform,
+  scheduledFor,
+  draft = false,
+  media = [],
+}) {
+  if (config.dryRun) {
+    logEvent("postiz_dry_run", {
+      platform,
+      scheduledFor,
+      draft,
+      content,
+      media: media.map((m) => m.path),
+    });
+    return { dryRun: true };
+  }
+  if (isPaused()) {
+    throw new Error("Publishing is paused (/resume to unfreeze).");
+  }
+
+  const integrations = integrationsForPlatform(
+    await listIntegrations(),
+    platform,
+  );
+  if (integrations.length === 0) {
+    throw new Error(
+      `No connected Postiz channel for platform "${platform}". Connect one in the Postiz dashboard.`,
+    );
+  }
+
+  const date = scheduledFor
+    ? new Date(scheduledFor).toISOString()
+    : new Date().toISOString();
+  const result = await request("POST", "/posts", {
+    type: draft ? "draft" : scheduledFor ? "schedule" : "now",
+    date,
     shortLink: false,
     tags: [],
-    posts: [
-      {
-        integration: { id: integrationId },
-        value: [{ content, ...(media.length ? { image: media } : {}) }],
-      },
-    ],
+    posts: integrations.map((integration) => ({
+      integration: { id: integration.id },
+      // image is required by the API even for text-only posts; it carries
+      // photos and videos alike.
+      value: [
+        {
+          content,
+          image: media.map((m) => ({
+            id: m.postiz_id ?? m.id,
+            path: m.path,
+          })),
+        },
+      ],
+      settings:
+        DEFAULT_SETTINGS[String(integration.identifier).toLowerCase()] ?? {},
+    })),
   });
+  logEvent("postiz_published", {
+    platform,
+    draft,
+    scheduledFor: date,
+    integrations: integrations.map((i) => i.id),
+  });
+  return result;
 }
 
-/**
- * Map our platform names to Postiz integration ids by provider identifier.
- * Postiz calls X "x" (older versions "twitter").
- */
-export function mapPlatforms(integrations) {
-  const map = {};
-  for (const i of integrations) {
-    if (i.disabled) continue;
-    const ident = String(i.identifier || "").toLowerCase();
-    if (ident.includes("linkedin") && !map.linkedin) map.linkedin = i.id;
-    if ((ident === "x" || ident.includes("twitter")) && !map.x) map.x = i.id;
-    if (ident.includes("instagram") && !map.instagram) map.instagram = i.id;
-  }
-  return map;
+export async function deletePost(postId) {
+  return request("DELETE", `/posts/${postId}`);
 }

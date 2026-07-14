@@ -1,6 +1,6 @@
 import { InlineKeyboard } from "grammy";
 import { config } from "../config.js";
-import { db, outreach, metrics, kdp, settings, links, logEvent } from "../db.js";
+import { db, outreach, metrics, kdp, settings, links, logEvent, scrubSecrets } from "../db.js";
 import { downloadTelegramFile } from "./files.js";
 import { callAgent } from "../agents/client.js";
 import { runSpecialistPipeline, parseFields } from "../agents/pipeline.js";
@@ -41,7 +41,7 @@ function firePipeline(bot, chatId, job) {
     .catch(async (err) => {
       console.error("Pipeline error:", err);
       logEvent("pipeline_error", { message: String(err?.message ?? err) });
-      await bot.api.sendMessage(chatId, `Pipeline failed: ${err.message}`);
+      await bot.api.sendMessage(chatId, `Pipeline failed: ${scrubSecrets(err.message)}`);
     });
 }
 
@@ -146,7 +146,7 @@ export function registerM3(bot, { requireApiKey }) {
         await verticalSnapshot(ctx, vertical);
       } catch (err) {
         console.error(`/${cmd} error:`, err);
-        await ctx.reply(`Snapshot failed: ${err.message}`);
+        await ctx.reply(`Snapshot failed: ${scrubSecrets(err.message)}`);
       }
     });
   }
@@ -182,7 +182,7 @@ export function registerM3(bot, { requireApiKey }) {
         const read = out.match(/^READ:\s*(.+)$/im)?.[1];
         extra = `\nLogged ${found.length} metric(s).${read ? "\n" + read : ""}`;
       } catch (err) {
-        extra = `\nStored the raw entry; metric extraction failed (${err.message}).`;
+        extra = `\nStored the raw entry; metric extraction failed (${scrubSecrets(err.message)}).`;
       }
     }
     await ctx.reply(`KDP figures logged.${extra}`);
@@ -207,7 +207,7 @@ export function registerM3(bot, { requireApiKey }) {
       ]);
       await ctx.reply(reply);
     } catch (err) {
-      await ctx.reply(`Idea logged, but the Chief of Staff call failed: ${err.message}`);
+      await ctx.reply(`Idea logged, but the Chief of Staff call failed: ${scrubSecrets(err.message)}`);
     }
   });
 
@@ -245,7 +245,7 @@ export function registerM3(bot, { requireApiKey }) {
         const row = outreach.get(id);
         await ctx.reply(outreachCard(row), { reply_markup: outreachKeyboard(id) });
       } catch (err) {
-        await ctx.reply(`Outreach Agent call failed: ${err.message}`);
+        await ctx.reply(`Outreach Agent call failed: ${scrubSecrets(err.message)}`);
       }
       return;
     }
@@ -351,7 +351,7 @@ export function registerM3(bot, { requireApiKey }) {
         },
       );
     } catch (err) {
-      await ctx.reply(`Critique Agent call failed: ${err.message}`);
+      await ctx.reply(`Critique Agent call failed: ${scrubSecrets(err.message)}`);
     }
   });
 

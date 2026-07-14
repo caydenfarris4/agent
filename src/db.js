@@ -65,6 +65,19 @@ CREATE TABLE IF NOT EXISTS kdp_entries (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Media library: files sent to the Telegram bot and mirrored into Postiz.
+-- The Postiz public API cannot list media, so this table IS the library;
+-- posts reference media by postiz_id + path.
+CREATE TABLE IF NOT EXISTS media (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  postiz_id        TEXT NOT NULL,
+  path             TEXT NOT NULL,             -- public uploads URL
+  kind             TEXT NOT NULL,             -- photo | video | animation | document
+  label            TEXT,                      -- Telegram caption, for finding it later
+  telegram_file_id TEXT,
+  created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Audit trail of everything the system does.
 CREATE TABLE IF NOT EXISTS events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,10 +245,43 @@ export const kdp = {
   },
 };
 
+const insertMedia = db.prepare(
+  "INSERT INTO media (postiz_id, path, kind, label, telegram_file_id) VALUES (?, ?, ?, ?, ?)",
+);
+
+export const mediaLibrary = {
+  save({ postizId, path, kind, label = null, telegramFileId = null }) {
+    const info = insertMedia.run(postizId, path, kind, label, telegramFileId);
+    return Number(info.lastInsertRowid);
+  },
+  list(limit = 20) {
+    return db
+      .prepare("SELECT * FROM media ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(limit);
+  },
+  get(id) {
+    return db.prepare("SELECT * FROM media WHERE id = ?").get(id);
+  },
+};
+
 const insertEvent = db.prepare(
   "INSERT INTO events (type, payload) VALUES (?, ?)",
 );
 
 export function logEvent(type, payload = {}) {
-  insertEvent.run(type, JSON.stringify(payload));
+  // Defense in depth: nothing that lands in the audit trail may carry a secret
+  // (e.g. an error quoting the Telegram file URL, which embeds the bot token).
+  insertEvent.run(type, scrubSecrets(JSON.stringify(payload)));
+}
+
+/**
+ * Strips secrets out of text that gets replied to chat or persisted in the
+ * events table (e.g. errors quoting a URL that embeds the bot token).
+ */
+export function scrubSecrets(text) {
+  let out = String(text);
+  for (const secret of [config.telegramToken, config.postizKey, config.anthropicApiKey]) {
+    if (secret) out = out.split(secret).join("[redacted]");
+  }
+  return out;
 }
