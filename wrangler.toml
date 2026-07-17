@@ -1,0 +1,37 @@
+name = "launch-system"
+main = "src/worker.js"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Agent pipelines are await-heavy, not CPU-heavy, but give them headroom
+# (requires the Workers paid plan).
+[limits]
+cpu_ms = 300000
+
+# Every 5 minutes: scheduler dispatch (daily/weekly runs by Denver wall
+# clock), the scheduled-post due check, and the background job queue.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "launch-system"
+database_id = "REPLACE_WITH_YOUR_D1_ID"   # from: npx wrangler d1 create launch-system
+
+# Prompt documents bundle as plain text.
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+
+# Non-secret configuration. Secrets are NOT set here — use:
+#   npx wrangler secret put TELEGRAM_BOT_TOKEN
+#   npx wrangler secret put TELEGRAM_WEBHOOK_SECRET   (any long random string)
+#   npx wrangler secret put ANTHROPIC_API_KEY
+#   npx wrangler secret put POSTIZ_API_KEY
+[vars]
+DRY_RUN = "true"
+TZ = "America/Denver"
+AGENT_MODEL = "claude-sonnet-4-6"
+# TELEGRAM_OWNER_ID = "123456789"        # optional: pin the owner
+# POSTIZ_API_URL = ""                    # defaults to Postiz cloud when the key is set

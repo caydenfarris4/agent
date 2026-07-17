@@ -1,14 +1,8 @@
-import { fetch as undiciFetch, EnvHttpProxyAgent, FormData } from "undici";
 import { config } from "./config.js";
 import { isPaused, logEvent } from "./db.js";
 
-// Node's global fetch ignores HTTPS_PROXY, so route through undici's
-// env-aware agent when a proxy is configured (same reason bot.js passes
-// an agent to grammY). On a normal VPS this is a no-op.
-const dispatcher =
-  process.env.HTTPS_PROXY || process.env.https_proxy
-    ? new EnvHttpProxyAgent()
-    : undefined;
+// Global fetch: native on Cloudflare Workers; the Node entry installs a
+// proxy-aware implementation when HTTPS_PROXY is set.
 
 export function isConfigured() {
   return Boolean(config.postizUrl && config.postizKey);
@@ -20,9 +14,8 @@ async function request(method, path, body) {
       "Postiz is not configured. Set POSTIZ_API_URL and POSTIZ_API_KEY in .env.",
     );
   }
-  const res = await undiciFetch(`${config.postizUrl}${path}`, {
+  const res = await fetch(`${config.postizUrl}${path}`, {
     method,
-    dispatcher,
     headers: {
       Authorization: config.postizKey,
       ...(body ? { "Content-Type": "application/json" } : {}),
@@ -100,9 +93,8 @@ export async function uploadMedia({ data, filename, contentType }) {
     new Blob([data], { type: contentType || "application/octet-stream" }),
     filename,
   );
-  const res = await undiciFetch(`${config.postizUrl}/upload`, {
+  const res = await fetch(`${config.postizUrl}/upload`, {
     method: "POST",
-    dispatcher,
     headers: { Authorization: config.postizKey },
     body: form,
   });
@@ -138,7 +130,7 @@ export async function createPost({
   media = [],
 }) {
   if (config.dryRun) {
-    logEvent("postiz_dry_run", {
+    await logEvent("postiz_dry_run", {
       platform,
       scheduledFor,
       draft,
@@ -147,7 +139,7 @@ export async function createPost({
     });
     return { dryRun: true };
   }
-  if (isPaused()) {
+  if (await isPaused()) {
     throw new Error("Publishing is paused (/resume to unfreeze).");
   }
 
@@ -186,7 +178,7 @@ export async function createPost({
         DEFAULT_SETTINGS[String(integration.identifier).toLowerCase()] ?? {},
     })),
   });
-  logEvent("postiz_published", {
+  await logEvent("postiz_published", {
     platform,
     draft,
     scheduledFor: date,

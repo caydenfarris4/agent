@@ -1,9 +1,19 @@
 import { Bot } from "grammy";
-import { HttpsProxyAgent } from "https-proxy-agent";
 import { config } from "../config.js";
-import { db, drafts, settings, links, getOwnerId, isPaused, setPaused, logEvent, scrubSecrets } from "../db.js";
+import {
+  sql,
+  jobs,
+  drafts,
+  settings,
+  links,
+  getOwnerId,
+  isPaused,
+  setPaused,
+  logEvent,
+  scrubSecrets,
+} from "../db.js";
 import { callAgent } from "../agents/client.js";
-import { runContentPipeline, reviseDraft } from "../agents/pipeline.js";
+import { contentBrief } from "../agents/pipeline.js";
 import { publishDraft, publishDue, describePublishResult } from "../publish.js";
 import { isConfigured as postizConfigured, checkConnection, integrationsForPlatform } from "../postiz.js";
 import { sendApprovalCard, scheduleKeyboard } from "./approvals.js";
@@ -11,24 +21,35 @@ import { formatSlot, toSqliteUtc } from "../schedule.js";
 import { registerM3, parseTargeting } from "./m3.js";
 import { registerM4 } from "../scheduler.js";
 
-export function createBot() {
-  // Honor HTTPS_PROXY when present (e.g. sandboxed/corporate environments).
-  // grammY's node-fetch ignores proxy env vars, so pass an agent explicitly.
-  // On a normal VPS this is a no-op.
-  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
+/**
+ * Build the bot. Runtime-specific concerns are injected:
+ * - clientConfig: grammY client options (the Node entry passes a proxy agent
+ *   when HTTPS_PROXY is set; Workers needs nothing).
+ * - afterUpdate: called after every handled update; the Node entry drains
+ *   the job queue here. On Workers the fetch handler drains via waitUntil.
+ */
+export function createBot({ clientConfig, afterUpdate } = {}) {
   const bot = new Bot(config.telegramToken, {
-    client: proxy
-      ? { baseFetchConfig: { agent: new HttpsProxyAgent(proxy), compress: true } }
-      : undefined,
+    client: clientConfig,
   });
 
-  // Rolling Chief of Staff conversation, in memory only. A restart clears
-  // it; durable state lives in SQLite.
+  // Rolling Chief of Staff conversation, in memory only. A restart (or
+  // Workers isolate eviction) clears it; durable state lives in the DB.
   const chiefHistory = [];
 
   function requireApiKey() {
     if (config.anthropicApiKey) return null;
-    return "ANTHROPIC_API_KEY is not set. Agent features are offline; add the key to .env and restart.";
+    return "ANTHROPIC_API_KEY is not set. Agent features are offline; add the key and redeploy.";
+  }
+
+  if (afterUpdate) {
+    bot.use(async (ctx, next) => {
+      try {
+        await next();
+      } finally {
+        afterUpdate();
+      }
+    });
   }
 
   // --- Owner lock -----------------------------------------------------------
@@ -37,12 +58,12 @@ export function createBot() {
   bot.use(async (ctx, next) => {
     const from = ctx.from?.id;
     if (!from) return;
-    const owner = getOwnerId();
+    const owner = await getOwnerId();
     if (owner === null) {
       // Unclaimed: only /start may claim ownership.
       if (ctx.message?.text?.startsWith("/start")) {
-        settings.set("owner_id", String(from));
-        logEvent("owner_claimed", { user_id: from });
+        await settings.set("owner_id", String(from));
+        await logEvent("owner_claimed", { user_id: from });
         await ctx.reply(
           "You are now registered as the owner of this launch system. Only this account can use the bot.\n\nTry /status.",
         );
@@ -50,7 +71,7 @@ export function createBot() {
       return;
     }
     if (from !== owner) {
-      logEvent("unauthorized_access", { user_id: from });
+      await logEvent("unauthorized_access", { user_id: from });
       return; // silently ignore strangers
     }
     await next();
@@ -67,53 +88,43 @@ export function createBot() {
 
   // --- /status: under ten lines ---------------------------------------------
   bot.command("status", async (ctx) => {
-    const queued = db
-      .prepare("SELECT COUNT(*) AS n FROM drafts WHERE status = 'queued'")
-      .get().n;
-    const scheduledToday = db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM drafts WHERE status = 'approved' AND date(scheduled_for) = date('now')",
-      )
-      .get().n;
-    const escalations = db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM drafts WHERE critique_verdict = 'ESCALATE' AND status NOT IN ('rejected','published')",
-      )
-      .get().n;
-    const outreachWaiting = db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM outreach WHERE status = 'awaiting_approval'",
-      )
-      .get().n;
+    const queued = (await sql.get("SELECT COUNT(*) AS n FROM drafts WHERE status = 'queued'")).n;
+    const scheduledToday = (await sql.get(
+      "SELECT COUNT(*) AS n FROM drafts WHERE status = 'approved' AND date(scheduled_for) = date('now')",
+    )).n;
+    const escalations = (await sql.get(
+      "SELECT COUNT(*) AS n FROM drafts WHERE critique_verdict = 'ESCALATE' AND status NOT IN ('rejected','published')",
+    )).n;
+    const outreachWaiting = (await sql.get(
+      "SELECT COUNT(*) AS n FROM outreach WHERE status = 'awaiting_approval'",
+    )).n;
 
     const lines = [
-      `Publishing: ${isPaused() ? "PAUSED" : "active"}${config.dryRun ? " (dry run)" : ""}`,
+      `Publishing: ${(await isPaused()) ? "PAUSED" : "active"}${config.dryRun ? " (dry run)" : ""}`,
       `Approval queue: ${queued} draft${queued === 1 ? "" : "s"} awaiting you`,
       `Scheduled today: ${scheduledToday} post${scheduledToday === 1 ? "" : "s"}`,
     ];
     const waiting = [];
     if (escalations > 0) waiting.push(`${escalations} escalation(s)`);
-    if (outreachWaiting > 0)
-      waiting.push(`${outreachWaiting} outreach target(s)`);
-    const unscheduled = db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM drafts WHERE status = 'approved' AND scheduled_for IS NULL AND published_at IS NULL",
-      )
-      .get().n;
-    if (unscheduled > 0)
-      waiting.push(`${unscheduled} approved draft(s) awaiting a post time`);
+    if (outreachWaiting > 0) waiting.push(`${outreachWaiting} outreach target(s)`);
+    const unscheduled = (await sql.get(
+      "SELECT COUNT(*) AS n FROM drafts WHERE status = 'approved' AND scheduled_for IS NULL AND published_at IS NULL",
+    )).n;
+    if (unscheduled > 0) waiting.push(`${unscheduled} approved draft(s) awaiting a post time`);
     lines.push(
-      waiting.length
-        ? `Waiting on you: ${waiting.join(", ")}`
-        : "Waiting on you: nothing",
+      waiting.length ? `Waiting on you: ${waiting.join(", ")}` : "Waiting on you: nothing",
     );
-    if (!links.all().amazon) {
+    const drafting = (await sql.get(
+      "SELECT COUNT(*) AS n FROM jobs WHERE status IN ('pending','running')",
+    )).n;
+    if (drafting > 0) lines.push(`In the pipeline right now: ${drafting} job(s).`);
+    if (!(await links.all()).amazon) {
       lines.push("Amazon link not set; drafts use a placeholder. Fix: /links amazon <url>");
     }
     await ctx.reply(lines.join("\n"));
   });
 
-  // --- /draft: run one full pipeline pass ------------------------------------
+  // --- /draft: queue one full pipeline pass -----------------------------------
   // Usage: /draft [platform] [vertical] <brief>
   // e.g.   /draft linkedin book six weeks out, the swim story angle
   bot.command("draft", async (ctx) => {
@@ -130,27 +141,21 @@ export function createBot() {
     }
 
     const { platform, vertical, rest: brief } = parseTargeting(args);
-
-    const chatId = ctx.chat.id;
+    await jobs.enqueue("pipeline", {
+      chatId: ctx.chat.id,
+      specialist: "content",
+      vertical,
+      platform,
+      assignment: contentBrief({ brief, vertical, platform }),
+    });
     await ctx.reply(
-      `Running the pipeline: ${platform}, ${vertical} vertical.\nBrief: ${brief}`,
+      `Running the pipeline: ${platform}, ${vertical} vertical.\nBrief: ${brief}\n\nThe approval card lands here when the audit is done.`,
     );
-    // Don't block the update loop while agents think; report back when done.
-    runContentPipeline(
-      { brief, vertical, platform },
-      { onProgress: (line) => bot.api.sendMessage(chatId, line).then(() => {}) },
-    )
-      .then((draft) => sendApprovalCard(bot.api, chatId, draft))
-      .catch(async (err) => {
-        console.error("Pipeline error:", err);
-        logEvent("pipeline_error", { message: String(err?.message ?? err) });
-        await bot.api.sendMessage(chatId, `Pipeline failed: ${scrubSecrets(err.message)}`);
-      });
   });
 
   // --- /queue: resend anything awaiting approval ------------------------------
   bot.command("queue", async (ctx) => {
-    const queued = drafts.listByStatus("queued");
+    const queued = await drafts.listByStatus("queued");
     if (queued.length === 0) {
       return ctx.reply("The approval queue is empty. Nothing is waiting on you.");
     }
@@ -165,13 +170,13 @@ export function createBot() {
   // --- Approve / Reject inline buttons ---------------------------------------
   bot.callbackQuery(/^approve:(\d+)$/, async (ctx) => {
     const id = Number(ctx.match[1]);
-    const draft = drafts.get(id);
+    const draft = await drafts.get(id);
     if (!draft || draft.status !== "queued") {
       await ctx.answerCallbackQuery({ text: "Already handled." });
       return;
     }
-    drafts.update(id, { status: "approved" });
-    logEvent("draft_approved", { draft_id: id });
+    await drafts.update(id, { status: "approved" });
+    await logEvent("draft_approved", { draft_id: id });
     await ctx.answerCallbackQuery({ text: "Approved. When should it post?" });
     // Swap Approve/Reject for the scheduling choices (peak slots per platform).
     await ctx.editMessageReplyMarkup({ reply_markup: scheduleKeyboard(draft) });
@@ -181,7 +186,7 @@ export function createBot() {
   bot.callbackQuery(/^pub:(\d+):(now|\d+)$/, async (ctx) => {
     const id = Number(ctx.match[1]);
     const when = ctx.match[2];
-    const draft = drafts.get(id);
+    const draft = await drafts.get(id);
     if (!draft || draft.status !== "approved" || draft.published_at) {
       await ctx.answerCallbackQuery({ text: "Already handled." });
       return;
@@ -191,18 +196,18 @@ export function createBot() {
       // Stamp the choice: if publishing is paused or fails, the due-check
       // and /resume know this draft was released, unlike one still waiting
       // for a time to be picked.
-      drafts.update(id, { scheduled_for: toSqliteUtc(new Date()) });
+      await drafts.update(id, { scheduled_for: toSqliteUtc(new Date()) });
       await ctx.answerCallbackQuery({ text: "Posting now." });
       await ctx.editMessageReplyMarkup(); // remove the buttons
-      const fresh = drafts.get(id);
+      const fresh = await drafts.get(id);
       const result = await publishDraft(fresh, { api: ctx.api });
       await ctx.reply(describePublishResult(fresh, result));
       return;
     }
 
     const slot = new Date(Number(when) * 1000);
-    drafts.update(id, { scheduled_for: toSqliteUtc(slot) });
-    logEvent("draft_scheduled", { draft_id: id, scheduled_for: toSqliteUtc(slot) });
+    await drafts.update(id, { scheduled_for: toSqliteUtc(slot) });
+    await logEvent("draft_scheduled", { draft_id: id, scheduled_for: toSqliteUtc(slot) });
     await ctx.answerCallbackQuery({ text: "Scheduled." });
     await ctx.editMessageReplyMarkup();
     await ctx.reply(
@@ -212,13 +217,13 @@ export function createBot() {
 
   bot.callbackQuery(/^reject:(\d+)$/, async (ctx) => {
     const id = Number(ctx.match[1]);
-    const draft = drafts.get(id);
+    const draft = await drafts.get(id);
     if (!draft || draft.status !== "queued") {
       await ctx.answerCallbackQuery({ text: "Already handled." });
       return;
     }
-    settings.set("awaiting_rejection_for", String(id));
-    settings.set("awaiting_edit_for", "");
+    await settings.set("awaiting_rejection_for", String(id));
+    await settings.set("awaiting_edit_for", "");
     await ctx.answerCallbackQuery({ text: "Rejecting." });
     await ctx.reply(
       `Rejecting draft #${id}. Reply with a one-line reason (it goes back to the specialist), or "skip".`,
@@ -228,13 +233,13 @@ export function createBot() {
   // --- ✏️ Edit: replace the copy, or instruct the specialist -------------------
   bot.callbackQuery(/^edit:(\d+)$/, async (ctx) => {
     const id = Number(ctx.match[1]);
-    const draft = drafts.get(id);
+    const draft = await drafts.get(id);
     if (!draft || draft.status !== "queued") {
       await ctx.answerCallbackQuery({ text: "Already handled." });
       return;
     }
-    settings.set("awaiting_edit_for", String(id));
-    settings.set("awaiting_rejection_for", "");
+    await settings.set("awaiting_edit_for", String(id));
+    await settings.set("awaiting_rejection_for", "");
     await ctx.answerCallbackQuery({ text: "Editing." });
     await ctx.reply(
       `Editing draft #${id}. Reply with either:\n` +
@@ -247,16 +252,16 @@ export function createBot() {
 
   // --- /pause and /resume: freeze or unfreeze all publishing instantly ------
   bot.command("pause", async (ctx) => {
-    setPaused(true);
-    logEvent("paused", {});
+    await setPaused(true);
+    await logEvent("paused", {});
     await ctx.reply(
       "All publishing is paused. Drafting continues; nothing goes out until /resume.",
     );
   });
 
   bot.command("resume", async (ctx) => {
-    setPaused(false);
-    logEvent("resumed", {});
+    await setPaused(false);
+    await logEvent("resumed", {});
     // Release only drafts whose post time was chosen and has arrived;
     // approved drafts still awaiting a time pick stay put.
     const flushed = await publishDue({ api: ctx.api });
@@ -296,14 +301,14 @@ export function createBot() {
           : `${p}: MISSING (connect it in Postiz, then rerun /channels)`,
       );
     }
-    logEvent("postiz_channels_checked", { count: check.integrations.length });
+    await logEvent("postiz_channels_checked", { count: check.integrations.length });
     await ctx.reply(lines.join("\n"));
   });
 
   // --- M3: specialists, commands, asset drops --------------------------------
   registerM3(bot, { requireApiKey });
 
-  // --- M4: /plan and /report on demand (schedulers start in index.js) --------
+  // --- M4: /plan, /report, /trends on demand ----------------------------------
   registerM4(bot, { requireApiKey });
 
   // --- Free-form text: rejection reasons, then Chief of Staff chat -----------
@@ -311,11 +316,11 @@ export function createBot() {
     const text = ctx.message.text.trim();
 
     // A pending edit captures the next message as new copy or an instruction.
-    const editing = settings.get("awaiting_edit_for");
+    const editing = await settings.get("awaiting_edit_for");
     if (editing) {
-      settings.set("awaiting_edit_for", "");
+      await settings.set("awaiting_edit_for", "");
       const id = Number(editing);
-      const draft = drafts.get(id);
+      const draft = await drafts.get(id);
       if (!draft || draft.status !== "queued") {
         return ctx.reply(`Draft #${id} is no longer in the queue; nothing edited.`);
       }
@@ -328,36 +333,31 @@ export function createBot() {
         const offline = requireApiKey();
         if (offline) return ctx.reply(offline);
         await ctx.reply(`Sending your instruction to the ${draft.agent} agent...`);
-        try {
-          const revised = await reviseDraft(draft, instruction);
-          drafts.update(id, { content: revised });
-          logEvent("draft_edited", { draft_id: id, mode: "instruction" });
-          await sendApprovalCard(ctx.api, ctx.chat.id, drafts.get(id));
-        } catch (err) {
-          await ctx.reply(`Revision failed: ${scrubSecrets(err.message)}. Draft #${id} is unchanged.`);
-        }
+        // Revision is a single agent call but still queued: webhook
+        // invocations must stay short, and the card resend follows the job.
+        await jobs.enqueue("revise", { chatId: ctx.chat.id, draftId: id, instruction });
         return;
       }
 
       // Full replacement: Cayden's words are final, no re-audit (Article IX).
-      drafts.update(id, { content: text });
-      logEvent("draft_edited", { draft_id: id, mode: "replace" });
+      await drafts.update(id, { content: text });
+      await logEvent("draft_edited", { draft_id: id, mode: "replace" });
       await ctx.reply(`Draft #${id} updated with your copy.`);
-      await sendApprovalCard(ctx.api, ctx.chat.id, drafts.get(id));
+      await sendApprovalCard(ctx.api, ctx.chat.id, await drafts.get(id));
       return;
     }
 
     // A pending rejection captures the next message as the reason.
-    const rejecting = settings.get("awaiting_rejection_for");
+    const rejecting = await settings.get("awaiting_rejection_for");
     if (rejecting) {
-      settings.set("awaiting_rejection_for", "");
+      await settings.set("awaiting_rejection_for", "");
       const id = Number(rejecting);
       const reason = /^skip$/i.test(text) ? "" : text;
-      drafts.update(id, {
+      await drafts.update(id, {
         status: "rejected",
         rejection_reason: reason || null,
       });
-      logEvent("draft_rejected", { draft_id: id, reason });
+      await logEvent("draft_rejected", { draft_id: id, reason });
       return ctx.reply(
         reason
           ? `Draft #${id} rejected. Reason logged for the specialist: "${reason}"`
@@ -369,12 +369,12 @@ export function createBot() {
     const offline = requireApiKey();
     if (offline) return ctx.reply(offline);
 
-    const queued = drafts.listByStatus("queued").length;
-    const linkList = Object.entries(links.all())
+    const queued = (await drafts.listByStatus("queued")).length;
+    const linkList = Object.entries(await links.all())
       .map(([k, v]) => `${k}=${v}`)
       .join(", ");
     const context =
-      `[System context: publishing is ${isPaused() ? "paused" : "active"}` +
+      `[System context: publishing is ${(await isPaused()) ? "paused" : "active"}` +
       `${config.dryRun ? ", DRY RUN (publishes are logged, not posted, until Cayden flips DRY_RUN off)" : ""}; ` +
       `${queued} draft(s) in the approval queue. ` +
       `Approved links: ${linkList || "none set yet"}. ` +

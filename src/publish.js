@@ -13,8 +13,8 @@ const MIME_BY_EXT = {
   mov: "video/quicktime",
 };
 
-function markPublished(id) {
-  drafts.update(id, {
+async function markPublished(id) {
+  await drafts.update(id, {
     status: "published",
     published_at: new Date().toISOString(),
   });
@@ -29,7 +29,7 @@ function markPublished(id) {
  * @returns {Promise<{published: boolean, dryRun?: boolean, reason?: string, error?: string}>}
  */
 export async function publishDraft(draft, { post = createPost, upload = uploadMedia, download = downloadTelegramFile, api = null } = {}) {
-  if (isPaused()) {
+  if (await isPaused()) {
     return { published: false, reason: "paused" };
   }
   // The bot owns scheduling: a future scheduled_for waits for the due-check
@@ -39,8 +39,8 @@ export async function publishDraft(draft, { post = createPost, upload = uploadMe
     return { published: false, reason: "not_due" };
   }
   if (config.dryRun) {
-    markPublished(draft.id);
-    logEvent("publish_dry_run", {
+    await markPublished(draft.id);
+    await logEvent("publish_dry_run", {
       draft_id: draft.id,
       vertical: draft.vertical,
       platform: draft.platform,
@@ -62,7 +62,7 @@ export async function publishDraft(draft, { post = createPost, upload = uploadMe
     return { published: false, reason: "media_unavailable" };
   }
   if (!postizConfigured()) {
-    logEvent("publish_skipped_no_publisher", { draft_id: draft.id });
+    await logEvent("publish_skipped_no_publisher", { draft_id: draft.id });
     return { published: false, reason: "no_publisher" };
   }
 
@@ -79,7 +79,7 @@ export async function publishDraft(draft, { post = createPost, upload = uploadMe
       if (!stored?.id) throw new Error("Postiz upload returned no file id");
       media = [{ id: stored.id, path: stored.path }];
       // Mirror into the media library so the asset is findable and reusable.
-      mediaLibrary.save({
+      await mediaLibrary.save({
         postizId: stored.id,
         path: stored.path,
         kind: MIME_BY_EXT[ext]?.startsWith("video") ? "video" : "photo",
@@ -92,8 +92,8 @@ export async function publishDraft(draft, { post = createPost, upload = uploadMe
       platform: draft.platform,
       media,
     });
-    markPublished(draft.id);
-    logEvent("publish_live", {
+    await markPublished(draft.id);
+    await logEvent("publish_live", {
       draft_id: draft.id,
       platform: draft.platform,
       postiz_response_id: res?.id ?? res?.[0]?.postId ?? null,
@@ -101,7 +101,7 @@ export async function publishDraft(draft, { post = createPost, upload = uploadMe
     return { published: true, dryRun: false };
   } catch (err) {
     // Draft stays 'approved' so /resume (or a fixed config) retries it.
-    logEvent("publish_error", { draft_id: draft.id, message: String(err?.message ?? err) });
+    await logEvent("publish_error", { draft_id: draft.id, message: String(err?.message ?? err) });
     return { published: false, reason: "error", error: scrubSecrets(err.message) };
   }
 }
@@ -117,7 +117,7 @@ export async function publishDraft(draft, { post = createPost, upload = uploadMe
 export async function publishDue(deps = {}) {
   const nowStr = new Date().toISOString().replace("T", " ").slice(0, 19);
   const results = [];
-  for (const draft of drafts.listByStatus("approved")) {
+  for (const draft of await drafts.listByStatus("approved")) {
     if (!draft.scheduled_for || draft.scheduled_for > nowStr) continue;
     results.push({ draft, result: await publishDraft(draft, deps) });
   }

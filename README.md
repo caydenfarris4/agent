@@ -23,8 +23,14 @@ The three governing documents live in this repo and are loaded at runtime:
   audit (PASS / FIX / ESCALATE) → Telegram approval queue (inline
   Approve/Reject buttons) → publish via Postiz.
 - **Telegram** — the only interface. Owner-locked to a single account.
-- **State** — SQLite (approval queue, outreach pipeline, metrics log, KDP
-  entries, audit log) at `DB_PATH`.
+  Updates arrive by webhook on Cloudflare Workers (long polling in local
+  dev), so there is no always-on process to babysit.
+- **State** — SQLite: Cloudflare D1 in production, a local file (`DB_PATH`)
+  in dev. Approval queue, outreach pipeline, metrics log, KDP entries,
+  media library, background jobs, audit log.
+- **Background jobs** — agent pipelines run minutes, longer than a webhook
+  invocation should. Commands enqueue into the `jobs` table; the queue
+  drains immediately after each update and on every cron tick.
 - **DRY_RUN** — global env flag, defaults to `true`. Everything works
   end-to-end but the publish step logs instead of posting. Do not flip it
   until the dry-run week is explicitly complete.
@@ -39,18 +45,6 @@ The three governing documents live in this repo and are loaded at runtime:
 - [x] **Post-M5 polish** — `/links` approved-asset store injected into every agent context; outreach follow-ups auto-drafted by the daily run after 10+ quiet days (one per target, sending stays manual); `/outreach mark <id> replied|scheduled|aired|declined`; clean scheduler shutdown; verified end to end against the live Claude API.
 - [x] **Peak-time scheduling** — Approve asks when to post: ⚡ now, or one of the next three peak engagement slots for that platform (sourced from Sprout Social / Buffer 2026 engagement studies, computed in `TZ`). Scheduled posts fire from a 5-minute due-check; `/pause` holds them and approved-but-unscheduled drafts never auto-post.
 - [x] **Trends Agent** (8th agent) — weekly virality and trends research every Monday 07:30 via Anthropic's server-side web search: what's trending in the leadership/faith-and-work space, what's earning reach overall, concrete angles mapped to the Story Bank, and what to avoid. Feeds the Monday plan and every agent's context; `/trends` on demand (`/trends new` re-researches).
-
-## Local setup
-
-```sh
-npm install
-cp .env.example .env    # fill in TELEGRAM_BOT_TOKEN (and later ANTHROPIC_API_KEY)
-npm start
-```
-
-Send `/start` to your bot. The first account to do so becomes the owner and
-everyone else is silently ignored (or pin it explicitly with
-`TELEGRAM_OWNER_ID`).
 
 ## Environment variables
 
@@ -67,79 +61,94 @@ See `.env.example` for the full list. The important ones:
 | `DB_PATH` | SQLite file location. Defaults to `./data/launch.db`. |
 | `TZ` | Timezone for the daily/weekly schedulers. |
 
-## Deploying to a small VPS with Docker
+## Deploying to Cloudflare Workers (primary)
 
-Any $5–6/month VPS (Hetzner CX22, DigitalOcean basic droplet) is plenty. The
-bot uses Telegram long polling, so **no inbound ports, domains, or TLS are
-needed** — outbound HTTPS is enough.
+Runs on the Workers paid plan you already have: webhook + D1 + Cron
+Triggers, no server to keep alive. From your machine (or any shell with
+this repo):
 
-1. **Provision the VPS** (Ubuntu 24.04 or similar) and install Docker:
-
-   ```sh
-   curl -fsSL https://get.docker.com | sh
-   ```
-
-2. **Get the code onto the box:**
+1. **Login and create the database** (one time):
 
    ```sh
-   git clone <your-repo-url> launch-system
-   cd launch-system
+   npm install
+   npx wrangler login
+   npx wrangler d1 create launch-system
    ```
 
-3. **Configure secrets** (never committed — `.env` is gitignored):
+   Put the returned `database_id` into `wrangler.toml`, then create the
+   tables:
 
    ```sh
-   cp .env.example .env
-   nano .env   # bot token, API key, DRY_RUN=true
+   npx wrangler d1 migrations apply launch-system --remote
    ```
 
-4. **Start it:**
+2. **Set the secrets** (one time; `TELEGRAM_WEBHOOK_SECRET` is any long
+   random string, e.g. `openssl rand -hex 32`):
 
    ```sh
-   docker compose up -d --build
-   docker compose logs -f    # watch for "Bot online as @..."
+   npx wrangler secret put TELEGRAM_BOT_TOKEN
+   npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+   npx wrangler secret put ANTHROPIC_API_KEY
+   npx wrangler secret put POSTIZ_API_KEY
    ```
 
-5. **Verify from your phone:** send `/start`, then `/status`.
+3. **Deploy and wire the webhook:**
 
-## Going live with Postiz (after the dry-run week)
+   ```sh
+   npx wrangler deploy
+   curl "https://launch-system.<your-subdomain>.workers.dev/setup?key=<TELEGRAM_WEBHOOK_SECRET>"
+   ```
 
-The approve button already publishes for real; it just needs the self-hosted
-Postiz stack next to the bot. Honest prerequisites first: **self-hosted
-Postiz requires your own developer app on each network** (a LinkedIn app, an
-X/Twitter developer app, a Meta app for Instagram), and their OAuth flows
-require **HTTPS on a real domain** pointing at your VPS. Budget an evening
-for this, once. The steps:
+   `/setup` registers the Telegram webhook and command menu and reports the
+   Postiz connection. Rerun it any time; it's idempotent.
 
-1. **Domain + TLS**: point a subdomain (e.g. `postiz.yourdomain.com`) at the
-   VPS and put Caddy or a Cloudflare Tunnel in front of port 5000.
-2. **Configure** in `.env`: `POSTIZ_MAIN_URL=https://postiz.yourdomain.com`,
-   `POSTIZ_JWT_SECRET` (long random string), `POSTIZ_DB_PASSWORD`.
-3. **Start the stack**: `docker compose --profile postiz up -d --build`
-   (plain `docker compose up -d` keeps running the bot alone).
-4. **Create your Postiz account** at the URL, then set
-   `POSTIZ_DISABLE_REGISTRATION=true` and restart so registration closes.
-5. **Create the provider apps** (LinkedIn, X, Meta for Instagram; Instagram
-   API posting additionally requires a Business/Creator account linked to a
-   Facebook page), put their client ids/secrets in `postiz.env` (gitignored),
-   and connect each channel in the Postiz UI. The
-   [Postiz providers docs](https://docs.postiz.com/providers) walk through
-   each one.
-6. **Point the bot at it** in `.env`:
-   `POSTIZ_API_URL=http://postiz:5000/api/public/v1` and `POSTIZ_API_KEY`
-   from Postiz settings. Restart the bot, run `/channels` in Telegram to map
-   linkedin/instagram/x.
-7. **Only when the dry-run week is explicitly complete**: set
-   `DRY_RUN=false` and restart. Per the build guide, aim the first live post
-   at a private test channel.
+4. **Verify from your phone:** send `/start` (first account becomes the
+   owner), then `/status` and `/channels`.
 
-### Operations
+### Operations (Workers)
 
 ```sh
-docker compose logs -f            # tail logs
-docker compose restart            # restart
-git pull && docker compose up -d --build   # deploy an update
+npx wrangler tail                 # live logs
+npx wrangler deploy               # ship an update
+npx wrangler d1 execute launch-system --remote \
+  --command "SELECT type, created_at FROM events ORDER BY id DESC LIMIT 20"
 ```
+
+- **Schedulers** run from a 5-minute Cron Trigger and fire by Denver wall
+  clock (trends Mon 07:30, plan Mon 08:00, daily 09:00, report Sun 18:00),
+  DST-safe. A missed window runs late, never twice.
+- **Constitution amendments** via /amend are stored in D1 and override the
+  bundled document immediately — no redeploy. Editing the file in the repo
+  requires a deploy (and applies only until the next /amend, which builds
+  on the stored copy).
+- **DRY_RUN** is a var in `wrangler.toml`; flip it to "false" and redeploy
+  only when the dry-run week is explicitly complete.
+
+## Local development
+
+```sh
+npm install
+cp .env.example .env    # fill in TELEGRAM_BOT_TOKEN
+npm start               # long polling against a local SQLite file
+```
+
+Or run the actual Worker locally: put the same values in `.dev.vars`
+(gitignored) and `npm run cf:dev`.
+
+Send `/start` to your bot. The first account to do so becomes the owner and
+everyone else is silently ignored (or pin it explicitly with
+`TELEGRAM_OWNER_ID`).
+
+## Fallback: small VPS with Docker
+
+The Node entry point (`src/index.js`) still runs the whole system with
+long polling, a local SQLite file, and an interval timer — same behavior,
+no Cloudflare. Any $5–6/month VPS works; see `Dockerfile` /
+`docker-compose.yml`, configure `.env`, then `docker compose up -d --build`.
+`docker compose --profile postiz up` additionally starts a self-hosted
+Postiz next to the bot (needs your own LinkedIn/X/Meta developer apps and
+HTTPS on a real domain); with Postiz cloud you don't need it.
+
 
 - **State** persists in `./data/` (mounted volume). Back it up with
   `cp data/launch.db backups/launch-$(date +%F).db` — a nightly cron line is

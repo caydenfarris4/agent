@@ -41,8 +41,8 @@ export function parseFields(text) {
  * to the Critique Agent, so real URLs land in drafts and invented ones fail
  * the audit.
  */
-export function linksBlock(platform) {
-  const all = links.all();
+export async function linksBlock(platform) {
+  const all = await links.all();
   const entries = Object.entries(all);
   if (entries.length === 0) {
     return [
@@ -160,7 +160,7 @@ async function critiqueAudit(call, job, draftText, rationale) {
     "",
     "DRAFT:",
     draftText,
-    linksBlock(job.platform),
+    await linksBlock(job.platform),
     "",
     "Respond in exactly this format, nothing before or after:",
     "VERDICT: PASS or FIX or ESCALATE",
@@ -212,19 +212,19 @@ async function chiefEscalationPosition(call, job, draftText, critiquePosition) {
  */
 export async function runSpecialistPipeline(job, { call = callAgent, onProgress = async () => {} } = {}) {
   // Every specialist sees the approved links with its assignment.
-  job = { ...job, assignment: job.assignment + "\n" + linksBlock(job.platform) };
+  job = { ...job, assignment: job.assignment + "\n" + (await linksBlock(job.platform)) };
   const name = SPECIALIST_NAMES[job.specialist] || job.specialist;
   await onProgress(`${name} is drafting...`);
   let draftText = await specialistDraft(call, job);
-  const id = drafts.insert({
+  const id = await drafts.insert({
     agent: job.specialist,
     vertical: job.vertical,
     platform: job.platform,
     content: draftText,
     status: "cos_review",
   });
-  if (job.mediaFileId) drafts.update(id, { media_file_id: job.mediaFileId });
-  logEvent("pipeline_started", {
+  if (job.mediaFileId) await drafts.update(id, { media_file_id: job.mediaFileId });
+  await logEvent("pipeline_started", {
     draft_id: id,
     specialist: job.specialist,
     vertical: job.vertical,
@@ -241,7 +241,7 @@ export async function runSpecialistPipeline(job, { call = callAgent, onProgress 
     // One return round only; whatever the Chief of Staff holds now goes on.
   }
   draftText = review.draft;
-  drafts.update(id, {
+  await drafts.update(id, {
     content: draftText,
     rationale: review.rationale,
     status: "critique",
@@ -251,7 +251,7 @@ export async function runSpecialistPipeline(job, { call = callAgent, onProgress 
   for (let round = 0; ; round++) {
     await onProgress("Critique Agent is auditing...");
     audit = await critiqueAudit(call, job, draftText, review.rationale);
-    logEvent("critique_verdict", {
+    await logEvent("critique_verdict", {
       draft_id: id,
       verdict: audit.verdict,
       round,
@@ -268,7 +268,7 @@ export async function runSpecialistPipeline(job, { call = callAgent, onProgress 
     }
     await onProgress(`FIX verdict. ${name} is redrafting...`);
     draftText = await specialistRedraft(call, job, draftText, audit.notes);
-    drafts.update(id, { content: draftText });
+    await drafts.update(id, { content: draftText });
   }
 
   let escalation = null;
@@ -283,7 +283,7 @@ export async function runSpecialistPipeline(job, { call = callAgent, onProgress 
     };
   }
 
-  drafts.update(id, {
+  await drafts.update(id, {
     content: draftText,
     status: "queued",
     critique_verdict: audit.verdict,
@@ -292,7 +292,7 @@ export async function runSpecialistPipeline(job, { call = callAgent, onProgress 
       : audit.notes,
     quality_flag: audit.qualityFlag ? 1 : 0,
   });
-  logEvent("draft_queued", { draft_id: id, verdict: audit.verdict });
+  await logEvent("draft_queued", { draft_id: id, verdict: audit.verdict });
   return drafts.get(id);
 }
 
@@ -313,7 +313,7 @@ export async function reviseDraft(draft, instruction, { call = callAgent } = {})
     "",
     "Current draft:",
     draft.content,
-    linksBlock(draft.platform),
+    await linksBlock(draft.platform),
     "",
     "Apply his instruction faithfully; change nothing he didn't ask about unless his instruction requires it. Return only the revised copy.",
   ].join("\n");

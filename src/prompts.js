@@ -1,12 +1,25 @@
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { settings } from "./db.js";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const PROMPTS_DIR = path.join(here, "..", "prompts");
+/**
+ * Prompt documents. Workers has no filesystem, so the runtime entry injects
+ * the document text: worker.js imports prompts/*.md as bundled text,
+ * index.js reads the same files from disk. Constitution amendments ratified
+ * via /amend are stored in the settings table and take precedence over the
+ * bundled document, preserving the "amend without redeploy" behavior.
+ */
 
-const CONSTITUTION_PATH = path.join(PROMPTS_DIR, "01_AGENT_CONSTITUTION.md");
-const SYSTEM_PROMPTS_PATH = path.join(PROMPTS_DIR, "02_SYSTEM_PROMPTS.md");
+let SOURCES = null;
+
+export function setPromptSources({ constitution, systemPrompts }) {
+  SOURCES = { constitution, systemPrompts };
+}
+
+function sources() {
+  if (!SOURCES) {
+    throw new Error("Prompt sources not set (setPromptSources was not called).");
+  }
+  return SOURCES;
+}
 
 // Maps agent keys to their section heading in 02_SYSTEM_PROMPTS.md.
 const SECTION_HEADINGS = {
@@ -22,18 +35,20 @@ const SECTION_HEADINGS = {
 
 export const AGENT_KEYS = Object.keys(SECTION_HEADINGS);
 
-export function loadConstitution() {
-  return fs.readFileSync(CONSTITUTION_PATH, "utf8");
+/** The live constitution: the amended copy in settings, else the bundled one. */
+export async function loadConstitution() {
+  const amended = await settings.get("constitution_document");
+  return amended || sources().constitution;
 }
 
-export function saveConstitution(text) {
-  fs.writeFileSync(CONSTITUTION_PATH, text, "utf8");
+export async function saveConstitution(text) {
+  await settings.set("constitution_document", text);
 }
 
 /**
  * Append a ratified amendment to the constitution text and return the new
  * document. Pure function so the /amend flow is testable without touching
- * the real file.
+ * stored state.
  */
 export function formatAmendment(doc, amendmentText, date) {
   const n = (doc.match(/\*\*Amendment \d+/g) || []).length + 1;
@@ -60,17 +75,23 @@ function extractSection(document, heading) {
 
 /**
  * Build the full system prompt for an agent: its section from
- * 02_SYSTEM_PROMPTS.md with the entire Constitution appended.
- * Read from disk on every call so an amendment to the Constitution
- * takes effect immediately, without touching code or restarting.
+ * 02_SYSTEM_PROMPTS.md with the entire Constitution appended. The
+ * constitution is re-read on every call so an amendment takes effect
+ * immediately, without touching code or redeploying.
  */
-export function buildSystemPrompt(agentKey) {
+export async function buildSystemPrompt(agentKey) {
   const heading = SECTION_HEADINGS[agentKey];
   if (!heading) {
     throw new Error(`Unknown agent: ${agentKey}`);
   }
-  const promptsDoc = fs.readFileSync(SYSTEM_PROMPTS_PATH, "utf8");
-  const section = extractSection(promptsDoc, heading);
-  const constitution = loadConstitution();
+  const section = extractSection(sources().systemPrompts, heading);
+  const constitution = await loadConstitution();
   return `${section}\n\n---\n\nThe Agent Constitution, which you operate under at all times, follows in full.\n\n${constitution}`;
+}
+
+/** Startup validation: every agent's section must exist in the bundled doc. */
+export function validatePromptSources() {
+  for (const key of AGENT_KEYS) {
+    extractSection(sources().systemPrompts, SECTION_HEADINGS[key]);
+  }
 }

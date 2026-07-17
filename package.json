@@ -6,7 +6,10 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "cf:dev": "wrangler dev",
+    "cf:deploy": "wrangler deploy",
+    "cf:tail": "wrangler tail"
   },
   "engines": {
     "node": ">=20"
@@ -17,7 +20,9 @@
     "dotenv": "^16.4.5",
     "grammy": "^1.44.0",
     "https-proxy-agent": "^9.1.0",
-    "node-cron": "^4.6.0",
     "undici": "^7.28.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.111.0"
   }
 }

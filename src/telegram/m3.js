@@ -1,9 +1,8 @@
 import { InlineKeyboard } from "grammy";
 import { config } from "../config.js";
-import { db, outreach, metrics, kdp, settings, links, logEvent, scrubSecrets } from "../db.js";
-import { downloadTelegramFile } from "./files.js";
+import { sql, jobs, outreach, metrics, kdp, settings, links, logEvent, scrubSecrets } from "../db.js";
 import { callAgent } from "../agents/client.js";
-import { runSpecialistPipeline, parseFields } from "../agents/pipeline.js";
+import { parseFields } from "../agents/pipeline.js";
 import { loadConstitution, saveConstitution, formatAmendment } from "../prompts.js";
 import { sendApprovalCard } from "./approvals.js";
 
@@ -26,23 +25,13 @@ export function parseTargeting(args, { platform = "linkedin", vertical = "book" 
   return { platform, vertical, rest: words.join(" ") };
 }
 
-async function downloadTelegramPhoto(api, fileId) {
-  // 4MB guard: Claude's per-image request limit, well above Telegram photos.
-  const { buffer } = await downloadTelegramFile(api, fileId, { maxBytes: 4 * 1024 * 1024 });
-  return buffer.toString("base64");
-}
-
-/** Fire a pipeline pass without blocking the update loop; card on completion. */
-function firePipeline(bot, chatId, job) {
-  runSpecialistPipeline(job, {
-    onProgress: (line) => bot.api.sendMessage(chatId, line).then(() => {}),
-  })
-    .then((draft) => sendApprovalCard(bot.api, chatId, draft))
-    .catch(async (err) => {
-      console.error("Pipeline error:", err);
-      logEvent("pipeline_error", { message: String(err?.message ?? err) });
-      await bot.api.sendMessage(chatId, `Pipeline failed: ${scrubSecrets(err.message)}`);
-    });
+/**
+ * Queue a pipeline pass. Agent pipelines run minutes, which no webhook
+ * invocation should carry; the job queue runs them right after the update
+ * is acknowledged (and the cron tick mops up anything left behind).
+ */
+async function firePipeline(chatId, job) {
+  await jobs.enqueue("pipeline", { chatId, ...job });
 }
 
 const OUTREACH_STATUS_ORDER = [
@@ -78,16 +67,16 @@ function outreachKeyboard(id) {
 
 async function verticalSnapshot(ctx, vertical) {
   const agentKey = vertical === "book" ? "book_growth" : "app_growth";
-  const recent = metrics.recent(vertical, 12);
-  const publishedWeek = db
-    .prepare(
-      "SELECT COUNT(*) AS n FROM drafts WHERE vertical = ? AND status = 'published' AND published_at >= datetime('now', '-7 days')",
-    )
-    .get(vertical).n;
-  const queued = db
-    .prepare("SELECT COUNT(*) AS n FROM drafts WHERE vertical = ? AND status = 'queued'")
-    .get(vertical).n;
-  const latestKdp = vertical === "book" ? kdp.latest() : null;
+  const recent = await metrics.recent(vertical, 12);
+  const publishedWeek = (await sql.get(
+    "SELECT COUNT(*) AS n FROM drafts WHERE vertical = ? AND status = 'published' AND published_at >= datetime('now', '-7 days')",
+    vertical,
+  )).n;
+  const queued = (await sql.get(
+    "SELECT COUNT(*) AS n FROM drafts WHERE vertical = ? AND status = 'queued'",
+    vertical,
+  )).n;
+  const latestKdp = vertical === "book" ? await kdp.latest() : null;
 
   if (recent.length === 0 && !latestKdp && publishedWeek === 0 && queued === 0) {
     await ctx.reply(
@@ -160,8 +149,8 @@ export function registerM3(bot, { requireApiKey }) {
           "Example: /kdp 42 ebooks, 13 paperbacks, 3 new reviews, 11 total",
       );
     }
-    const id = kdp.insert(raw);
-    logEvent("kdp_logged", { id });
+    const id = await kdp.insert(raw);
+    await logEvent("kdp_logged", { id });
 
     let extra = "";
     if (config.anthropicApiKey) {
@@ -177,7 +166,7 @@ export function registerM3(bot, { requireApiKey }) {
         ]);
         const found = [...out.matchAll(/^METRIC:\s*(.+?)\s*=\s*(.+)$/gim)];
         for (const m of found) {
-          metrics.insert({ vertical: "book", metric: m[1].trim(), value: m[2].trim(), note: "kdp" });
+          await metrics.insert({ vertical: "book", metric: m[1].trim(), value: m[2].trim(), note: "kdp" });
         }
         const read = out.match(/^READ:\s*(.+)$/im)?.[1];
         extra = `\nLogged ${found.length} metric(s).${read ? "\n" + read : ""}`;
@@ -192,7 +181,7 @@ export function registerM3(bot, { requireApiKey }) {
   bot.command("idea", async (ctx) => {
     const text = (ctx.match || "").trim();
     if (!text) return ctx.reply("Usage: /idea <the thought>");
-    logEvent("idea", { text });
+    await logEvent("idea", { text });
     const offline = requireApiKey();
     if (offline) return ctx.reply(`Idea logged. ${offline}`);
     try {
@@ -235,14 +224,14 @@ export function registerM3(bot, { requireApiKey }) {
           },
         ]);
         const f = parseFields(out);
-        const id = outreach.insert({
+        const id = await outreach.insert({
           target,
           brief: f.brief || out,
           pitch: f.pitch || "",
           status: "awaiting_approval",
         });
-        logEvent("outreach_target_added", { id, target });
-        const row = outreach.get(id);
+        await logEvent("outreach_target_added", { id, target });
+        const row = await outreach.get(id);
         await ctx.reply(outreachCard(row), { reply_markup: outreachKeyboard(id) });
       } catch (err) {
         await ctx.reply(`Outreach Agent call failed: ${scrubSecrets(err.message)}`);
@@ -253,13 +242,13 @@ export function registerM3(bot, { requireApiKey }) {
     const sent = args.match(/^sent\s+(\d+)$/i);
     if (sent) {
       const id = Number(sent[1]);
-      const row = outreach.get(id);
+      const row = await outreach.get(id);
       if (!row) return ctx.reply(`No outreach target #${id}.`);
       if (row.status !== "approved") {
         return ctx.reply(`Target #${id} is '${row.status}', not 'approved'; only approved pitches get marked sent.`);
       }
-      outreach.update(id, { status: "pitched" });
-      logEvent("outreach_pitched", { id });
+      await outreach.update(id, { status: "pitched" });
+      await logEvent("outreach_pitched", { id });
       return ctx.reply(`Target #${id} marked pitched. If it stays quiet 10+ days, the daily run drafts the one allowed follow-up.`);
     }
 
@@ -267,15 +256,15 @@ export function registerM3(bot, { requireApiKey }) {
     if (mark) {
       const id = Number(mark[1]);
       const status = mark[2].toLowerCase();
-      const row = outreach.get(id);
+      const row = await outreach.get(id);
       if (!row) return ctx.reply(`No outreach target #${id}.`);
-      outreach.update(id, { status });
-      logEvent("outreach_marked", { id, status });
+      await outreach.update(id, { status });
+      await logEvent("outreach_marked", { id, status });
       return ctx.reply(`Target #${id} (${row.target}) marked ${status}.`);
     }
 
     // Status view.
-    const counts = Object.fromEntries(outreach.counts().map((r) => [r.status, r.n]));
+    const counts = Object.fromEntries((await outreach.counts()).map((r) => [r.status, r.n]));
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
     if (total === 0) {
       return ctx.reply(
@@ -290,19 +279,19 @@ export function registerM3(bot, { requireApiKey }) {
       if (counts[s]) lines.push(`  ${s.replace("_", " ")}: ${counts[s]}`);
     }
     await ctx.reply(lines.join("\n"));
-    for (const row of outreach.listByStatus("awaiting_approval")) {
+    for (const row of await outreach.listByStatus("awaiting_approval")) {
       await ctx.reply(outreachCard(row), { reply_markup: outreachKeyboard(row.id) });
     }
   });
 
   bot.callbackQuery(/^oapprove:(\d+)$/, async (ctx) => {
     const id = Number(ctx.match[1]);
-    const row = outreach.get(id);
+    const row = await outreach.get(id);
     if (!row || row.status !== "awaiting_approval") {
       return ctx.answerCallbackQuery({ text: "Already handled." });
     }
-    outreach.update(id, { status: "approved" });
-    logEvent("outreach_approved", { id });
+    await outreach.update(id, { status: "approved" });
+    await logEvent("outreach_approved", { id });
     await ctx.answerCallbackQuery({ text: "Approved." });
     await ctx.editMessageReplyMarkup();
     await ctx.reply(
@@ -312,12 +301,12 @@ export function registerM3(bot, { requireApiKey }) {
 
   bot.callbackQuery(/^oreject:(\d+)$/, async (ctx) => {
     const id = Number(ctx.match[1]);
-    const row = outreach.get(id);
+    const row = await outreach.get(id);
     if (!row || row.status !== "awaiting_approval") {
       return ctx.answerCallbackQuery({ text: "Already handled." });
     }
-    outreach.update(id, { status: "declined" });
-    logEvent("outreach_declined", { id });
+    await outreach.update(id, { status: "declined" });
+    await logEvent("outreach_declined", { id });
     await ctx.answerCallbackQuery({ text: "Passed." });
     await ctx.editMessageReplyMarkup();
     await ctx.reply(`Target #${id} declined and off the list.`);
@@ -341,7 +330,7 @@ export function registerM3(bot, { requireApiKey }) {
           },
         ])
       ).trim();
-      settings.set("pending_amendment", restated);
+      await settings.set("pending_amendment", restated);
       await ctx.reply(
         `The Critique Agent restates your amendment as:\n\n${restated}\n\nRatify it?`,
         {
@@ -356,12 +345,12 @@ export function registerM3(bot, { requireApiKey }) {
   });
 
   bot.callbackQuery("amend:confirm", async (ctx) => {
-    const text = settings.get("pending_amendment", "");
+    const text = await settings.get("pending_amendment", "");
     if (!text) return ctx.answerCallbackQuery({ text: "Nothing pending." });
-    settings.set("pending_amendment", "");
+    await settings.set("pending_amendment", "");
     const date = new Date().toISOString().slice(0, 10);
-    saveConstitution(formatAmendment(loadConstitution(), text, date));
-    logEvent("constitution_amended", { text });
+    await saveConstitution(formatAmendment(await loadConstitution(), text, date));
+    await logEvent("constitution_amended", { text });
     await ctx.answerCallbackQuery({ text: "Ratified." });
     await ctx.editMessageReplyMarkup();
     await ctx.reply(
@@ -370,7 +359,7 @@ export function registerM3(bot, { requireApiKey }) {
   });
 
   bot.callbackQuery("amend:cancel", async (ctx) => {
-    settings.set("pending_amendment", "");
+    await settings.set("pending_amendment", "");
     await ctx.answerCallbackQuery({ text: "Cancelled." });
     await ctx.editMessageReplyMarkup();
     await ctx.reply("Amendment dropped. The Constitution is unchanged.");
@@ -381,7 +370,7 @@ export function registerM3(bot, { requireApiKey }) {
     const args = (ctx.match || "").trim();
 
     if (!args) {
-      const all = Object.entries(links.all());
+      const all = Object.entries(await links.all());
       const lines = all.length
         ? ["Approved links (agents use these exact URLs):", ...all.map(([k, v]) => `  ${k}: ${v}`)]
         : ["No links set yet. Agents use the placeholder [AMAZON LINK] until you add the real one."];
@@ -397,9 +386,9 @@ export function registerM3(bot, { requireApiKey }) {
     const rm = args.match(/^remove\s+(\S+)$/i);
     if (rm) {
       const name = rm[1].toLowerCase();
-      if (!links.all()[name]) return ctx.reply(`No link named "${name}".`);
-      links.remove(name);
-      logEvent("link_removed", { name });
+      if (!(await links.all())[name]) return ctx.reply(`No link named "${name}".`);
+      await links.remove(name);
+      await logEvent("link_removed", { name });
       return ctx.reply(`Link "${name}" removed.`);
     }
 
@@ -408,8 +397,8 @@ export function registerM3(bot, { requireApiKey }) {
       return ctx.reply("Usage: /links <name> <url>  (the url must start with http). Bare /links lists everything.");
     }
     const name = m[1].toLowerCase();
-    links.set(name, m[2]);
-    logEvent("link_set", { name });
+    await links.set(name, m[2]);
+    await logEvent("link_set", { name });
     return ctx.reply(
       `Link "${name}" saved. Every agent sees it from the next draft on; the Critique Agent rejects drafts that use any URL not on this list.`,
     );
@@ -426,7 +415,7 @@ export function registerM3(bot, { requireApiKey }) {
     const offline = requireApiKey();
     if (offline) return ctx.reply(offline);
     await ctx.reply("Engagement Agent is drafting a reply...");
-    firePipeline(bot, ctx.chat.id, {
+    await firePipeline(ctx.chat.id, {
       specialist: "engagement",
       vertical: "book",
       platform: "reply",
@@ -460,38 +449,15 @@ export function registerM3(bot, { requireApiKey }) {
       ["linkedin", "instagram", "x"].find((p) => lower.includes(p)) || "instagram";
     const vertical = /foreman|\bapp\b/.test(lower) ? "app" : "book";
 
-    let imageBase64 = null;
-    if (isPhoto) {
-      try {
-        imageBase64 = await downloadTelegramPhoto(ctx.api, fileId);
-      } catch (err) {
-        console.error("Photo download failed:", err);
-      }
-    }
-
-    const assignment = imageBase64
-      ? [
-          `Cayden uploaded the attached photo with this caption: "${caption}".`,
-          `Build the ${platform} post around this exact asset per your charter. The photo is attached; write to what is actually in it.`,
-          "Return only the post copy, exactly as it should be published.",
-        ].join("\n")
-      : [
-          `Cayden uploaded a ${isPhoto ? "photo" : "video"} with this caption: "${caption}".`,
-          `You have NOT been shown the ${isPhoto ? "image" : "footage"}. Write the hook and ${platform} caption strictly from his description; do not describe visuals he has not described.`,
-          isPhoto ? "" : "If a cut list or on-screen text would help, suggest them from the caption only, clearly marked as suggestions.",
-          "Return only the post copy, exactly as it should be published.",
-        ].filter(Boolean).join("\n");
-
     await ctx.reply(
       `Asset received (${isPhoto ? "photo" : "video"}). Content Agent is building a ${platform} ${vertical} post around it...`,
     );
-    firePipeline(bot, ctx.chat.id, {
+    await firePipeline(ctx.chat.id, {
       specialist: "content",
       vertical,
       platform,
       mediaFileId: fileId,
-      imageBase64,
-      assignment,
+      asset: { caption, isPhoto },
     });
   });
 }

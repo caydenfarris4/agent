@@ -3,3 +3,5 @@ node_modules/
 data/
 *.log
 postiz.env
+.dev.vars
+.wrangler/
